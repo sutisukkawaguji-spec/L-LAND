@@ -129,6 +129,16 @@ test('push and pull against the simulated LTAX', { skip: !chrome && 'ไม่�
       assert.equal(st.user.org, 'อบต.ทดสอบ');
     });
 
+    await t.test('live lookup reads LTAX without storing anything', async () => {
+      const before = JSON.stringify([store.list('lands'), store.list('owners')]);
+      const r = await engine.lookup({ kind: 'parcel', code: '60a002' });
+      assert.equal(r.found, true);
+      assert.equal(r.values.docNo, DB.lands.find(x => x.parcelCode === '60A002').docNo);
+      assert.equal(r.values.ownerRows[0].psnId, '1100000000016');
+      assert.equal(JSON.stringify([store.list('lands'), store.list('owners')]), before);
+      assert.equal((await engine.lookup({ kind: 'parcel', code: '99Z999' })).found, false);
+    });
+
     await t.test('push results are remembered per record and a stopped job can be resumed', async () => {
       assert.equal(store.get('pushes', `lands:${land.id}`).mode, 'real');
       assert.equal(store.get('pushes', `lands:${land.id}`).status, 'done');

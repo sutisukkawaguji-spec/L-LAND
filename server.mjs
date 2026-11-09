@@ -17,6 +17,7 @@ import { ENTITIES } from './public/shared/schema.mjs';
 import { repairObject } from './public/shared/thai-text.mjs';
 import { areaM2, bboxOf } from './public/shared/proj.mjs';
 import { ownerRelated, deleteOwner, deleteRecords, fillPrices } from './lib/registry-ops.mjs';
+import { Cloud } from './lib/cloud.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DATA = process.env.LLAN_DATA_DIR || path.join(ROOT, 'data');
@@ -79,9 +80,25 @@ function changeSummary() {
 const routes = [];
 const route = (method, pattern, fn) => routes.push({ method, re: new RegExp(`^${pattern.replace(/:(\w+)/g, '(?<$1>[^/]+)')}$`), fn });
 
+const publicSettings = () => {
+  const { cloud = {}, ...rest } = store.settings;
+  return { ...rest, ltax: { ...DEFAULT_LTAX, ...(rest.ltax || {}) }, cloud: { url: cloud.url || '', enabled: !!cloud.enabled, hasKey: !!cloud.key, dirty: !!cloud.dirty, lastSync: cloud.lastSync || null } };
+};
+// Shapes go to Supabase as they change when enabled. A failed upload marks the cloud copy as behind.
+const cloud = () => (store.settings.cloud?.enabled ? new Cloud(store.settings.cloud) : null);
+async function toCloud(fn) {
+  const c = cloud();
+  if (!c) return null;
+  try { await fn(c); return null; } catch (err) {
+    await store.saveSettings({ cloud: { ...store.settings.cloud, dirty: true } });
+    return `บันทึกในเครื่องแล้ว แต่ส่งขึ้น Supabase ไม่สำเร็จ: ${err.message}`;
+  }
+}
+const who = () => session.user?.name || session.mode;
+
 route('GET', '/api/state', () => ({
   counts: Object.fromEntries([...RECORDS, 'features', 'layers'].map(c => [c, store.list(c).length])),
-  pending: changeSummary().length + store.list('deletions').length, settings: { ...store.settings, ltax: { ...DEFAULT_LTAX, ...(store.settings.ltax || {}) } }, dataDir: DATA,
+  pending: changeSummary().length + store.list('deletions').length, settings: publicSettings(), dataDir: DATA,
 }));
 route('GET', '/api/records', () => annotate());
 route('GET', '/api/layers', () => store.list('layers'));
@@ -134,8 +151,12 @@ route('POST', '/api/features', async (_, body) => {
   if (layer.codeField) attrs[layer.codeField] = code;
   const feature = await store.upsert('features', { layerId: layer.id, kind, fid, code, ...shapeFields(geometry), attrs: { ...attrs, ...(body.attrs || {}) }, drawn: true },
     { reason: `วาดรูป${kind === 'parcel' ? 'แปลง' : 'อาคาร'}ใหม่ ${code}` });
-  await store.upsert('layers', { ...layer, count: feats.length + 1 }, { reason: 'เพิ่มรูปในชั้นแผนที่' });
-  return feature;
+  const layerNow = await store.upsert('layers', { ...layer, count: feats.length + 1 }, { reason: 'เพิ่มรูปในชั้นแผนที่' });
+  const cloudWarning = await toCloud(async c => {
+    await c.upsertLayer(layerNow); await c.upsertFeatures([feature], who());
+    await c.log({ feature_id: feature.id, code: feature.code, action: 'create', area_after: feature.areaM2, by_user: who() });
+  });
+  return { ...feature, cloudWarning };
 });
 
 route('PUT', '/api/features/:id', async ({ id }, body) => {
@@ -150,7 +171,12 @@ route('PUT', '/api/features/:id', async ({ id }, body) => {
     Object.assign(next, shapeFields(checkGeometry(body.geometry)), { reshaped: true });
     reason = `แก้รูป ${next.code || ''} พื้นที่ ${old.areaM2} → ${next.areaM2} ตร.ม.`;
   }
-  return store.upsert('features', next, { reason });
+  const saved = await store.upsert('features', next, { reason });
+  const cloudWarning = await toCloud(async c => {
+    await c.upsertFeatures([saved], who());
+    await c.log({ feature_id: saved.id, code: saved.code, action: body.geometry ? 'reshape' : 'update', area_before: old.areaM2, area_after: saved.areaM2, by_user: who() });
+  });
+  return { ...saved, cloudWarning };
 });
 
 route('DELETE', '/api/features/:id', async ({ id }) => {
@@ -159,13 +185,18 @@ route('DELETE', '/api/features/:id', async ({ id }) => {
   await store.remove('features', id);
   const layer = store.get('layers', old.layerId);
   if (layer) await store.upsert('layers', { ...layer, count: Math.max(0, (layer.count || 1) - 1) }, { reason: `ลบรูป ${old.code || ''}` });
-  return { ok: true };
+  const cloudWarning = await toCloud(async c => {
+    await c.deleteFeature(id);
+    await c.log({ feature_id: id, code: old.code, action: 'delete', area_before: old.areaM2, by_user: who() });
+  });
+  return { ok: true, cloudWarning };
 });
 
 route('DELETE', '/api/layers/:id', async ({ id }) => {
   await store.replaceAll('features', store.list('features').filter(f => f.layerId !== id), { action: 'delete-layer', recordId: id });
   await store.remove('layers', id);
-  return { ok: true };
+  const cloudWarning = await toCloud(c => c.deleteLayer(id));
+  return { ok: true, cloudWarning };
 });
 
 // Registry operations
@@ -200,8 +231,38 @@ route('GET', '/api/reports/overlay', () => overlayReport(store.data));
 route('PUT', '/api/settings', async (_, body) => {
   const patch = { ...body };
   if (body.ltax) patch.ltax = { ...(store.settings.ltax || {}), ...body.ltax };
-  return store.saveSettings(patch);
+  if (body.cloud) {
+    const old = store.settings.cloud || {};
+    patch.cloud = { ...old, url: String(body.cloud.url ?? old.url ?? '').trim(), enabled: !!body.cloud.enabled, key: body.cloud.key ? String(body.cloud.key).trim() : old.key || '' };
+  }
+  await store.saveSettings(patch);
+  return publicSettings();
 });
+
+// Supabase: shapes only. Pull replaces the local shapes with the cloud copy.
+route('GET', '/api/cloud/status', async () => {
+  const c = new Cloud(store.settings.cloud || {});
+  if (!c.configured) return { ok: false, message: 'ยังไม่ได้ใส่ URL หรือ secret key' };
+  try { return { ...(await c.status()), local: store.list('features').length }; } catch (err) { return { ok: false, message: err.message }; }
+});
+route('POST', '/api/cloud/push', async () => {
+  const c = new Cloud(store.settings.cloud || {});
+  const r = await c.pushAll(store.list('layers'), store.list('features'), who());
+  await store.saveSettings({ cloud: { ...store.settings.cloud, dirty: false, lastSync: new Date().toISOString() } });
+  return r;
+});
+route('POST', '/api/cloud/pull', async () => {
+  const c = new Cloud(store.settings.cloud || {});
+  const { layers, features } = await c.pullAll();
+  const keep = new Map(store.list('features').map(f => [f.id, f]));
+  // Cloud rows carry no personal attributes; keep any the local copy still has for the same shape.
+  const merged = features.map(f => ({ ...f, attrs: { ...(keep.get(f.id)?.attrs || {}), ...f.attrs }, bbox: bboxOf(f.geometry) }));
+  await store.replaceAll('layers', layers, { action: 'cloud-pull', after: { layers: layers.length } });
+  await store.replaceAll('features', merged, { action: 'cloud-pull', after: { features: merged.length } });
+  await store.saveSettings({ cloud: { ...store.settings.cloud, dirty: false, lastSync: new Date().toISOString() } });
+  return { layers: layers.length, features: merged.length };
+});
+route('GET', '/api/cloud/schema', async () => ({ sql: await readFile(path.join(ROOT, 'supabase', 'schema.sql'), 'utf8') }));
 
 // Imports. Files arrive base64-encoded in JSON from the browser file picker.
 route('POST', '/api/import/shapefile', async (_, body) => {
@@ -212,7 +273,8 @@ route('POST', '/api/import/shapefile', async (_, body) => {
   await store.replaceAll('features', [...store.list('features').filter(f => f.layerId !== layer.id), ...features],
     { action: 'import-layer', recordId: layer.id, after: { name: layer.name, kind: layer.kind, count: layer.count, crs: layer.crs } });
   await store.upsert('layers', layer, { reason: 'นำเข้าชั้นแผนที่' });
-  return { layer, join: joinReport(store.data)[layer.kind]?.summary || null };
+  const cloudWarning = await toCloud(async c => { await c.deleteLayerFeatures(layer.id).catch(() => {}); await c.upsertLayer(layer); await c.upsertFeatures(features, who()); });
+  return { layer, join: joinReport(store.data)[layer.kind]?.summary || null, cloudWarning };
 });
 
 route('POST', '/api/import/ltax-xlsx', async (_, body) => {
@@ -275,6 +337,7 @@ route('GET', '/api/checks', () => store.list('checks'));
 // LTAX
 route('GET', '/api/ltax/status', () => engine.status());
 route('POST', '/api/ltax/browser', () => engine.openBrowser());
+route('POST', '/api/ltax/lookup', async (_, body) => engine.lookup(body));
 route('POST', '/api/ltax/enter', async () => ({ ok: await engine.enterLtax() }));
 route('GET', '/api/ltax/jobs', () => engine.listJobs());
 route('GET', '/api/ltax/jobs/:id', ({ id }) => store.get('jobs', id));

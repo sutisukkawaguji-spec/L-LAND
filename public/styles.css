@@ -216,3 +216,7 @@ dialog.confirm ul { margin: 6px 0; padding-left: 20px; font-size: 13px; max-heig
   .map-bar #zoomIn, .map-bar #zoomOut { display: none; } /* pinch to zoom on phones */
   .cards .card { min-width: calc(50% - 6px); }
 }
+
+/* L-LAN Web */
+.login-box input:not([type=checkbox]) { width: 100%; margin: 6px 0; padding: 10px; }
+body.viewer .edit-only { display: none !important; }

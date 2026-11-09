@@ -256,6 +256,7 @@ async function showFeature(f) {
       ${chk ? `<span class="pill ${chk.found ? 'ok' : 'err'}">${chk.found ? (chk.count > 1 ? `พบใน LTAX ${chk.count} รายการ` : 'พบใน LTAX') : 'ไม่พบใน LTAX'} · ตรวจ ${new Date(chk.at).toLocaleDateString('th-TH')}</span>` : ''}
       ${ov ? `<span class="pill ${ov.result === 'ตรงแปลง' || ov.result === 'แปลงซ้อนกัน' ? 'ok' : 'warn'}">${esc(ov.result)}${ov.foundParcels ? ` (${esc(ov.foundParcels)})` : ''}</span>` : ''}</div>
     ${recHtml}
+    ${f.code && f.kind !== 'other' ? '<div class="row"><button id="liveLtax" title="อ่านข้อมูลปัจจุบันจาก LTAX ONLINE มาแสดง ไม่บันทึกเก็บไว้">⟳ ดูข้อมูลสดจาก LTAX</button></div><div id="liveBox"></div>' : ''}
     ${issues.length ? `<ul class="issues">${issues.map(i => `<li class="${i.level}">${esc(i.message)}</li>`).join('')}</ul>` : ''}
     <div class="row">
       ${rec ? `<button class="primary" id="sideEdit">แก้ไขข้อมูลทะเบียน</button>` : f.kind !== 'other' ? `<button class="primary" id="sideCreate">สร้างข้อมูล${f.kind === 'parcel' ? 'ที่ดิน' : 'สิ่งปลูกสร้าง'}จากรูปนี้</button>` : ''}
@@ -268,6 +269,13 @@ async function showFeature(f) {
     <div class="row"><button id="featSave">บันทึกข้อมูลรูปแปลง</button></div>`;
   $('#sideEdit')?.addEventListener('click', () => openEditor(entity, rec.id));
   $('#sideClose').addEventListener('click', () => { map.selected = null; map.draw(); showFeature(null); });
+  $('#liveLtax')?.addEventListener('click', guard(async () => {
+    if (S.session.mode !== 'ltax') return toast('ต้องเข้าสู่ระบบด้วย DLA SSO ก่อน', true);
+    const box = $('#liveBox');
+    box.innerHTML = '<p class="muted">กำลังอ่านจาก LTAX…</p>';
+    try { box.innerHTML = liveHtml(await api('POST', '/api/ltax/lookup', { kind: f.kind, code: f.code })); }
+    catch (e) { box.innerHTML = `<p class="pill err">${esc(e.message)}</p>`; }
+  }));
   $('#shapeEdit')?.addEventListener('click', guard(() => mapEdit.editShape(f)));
   $('#shapeDelete').addEventListener('click', guard(() => mapEdit.deleteShape(f)));
   $('#shapeAddBuilding')?.addEventListener('click', () => { map.zoomTo(f, 0.15); $('#mapBar [data-tool="building-rect"]').click(); });
@@ -281,12 +289,26 @@ async function showFeature(f) {
     if (!Object.keys(attrs).length && code === f.code) return toast('ไม่มีการเปลี่ยนแปลง');
     const list = [...(code !== f.code ? [`รหัส: ${f.code || '-'} → ${code || '-'}`] : []), ...Object.entries(attrs).map(([k, v]) => `${k}: ${full.attrs[k] ?? '-'} → ${v || '-'}`)];
     if (!(await confirmBox(`บันทึกข้อมูลรูปแปลง ${list.length} ช่อง?<ul>${list.map(x => `<li>${esc(x)}</li>`).join('')}</ul>`))) return;
-    await api('PUT', `/api/features/${f.id}`, { attrs, code });
+    const res = await api('PUT', `/api/features/${f.id}`, { attrs, code });
+    if (res.cloudWarning) toast(res.cloudWarning, true);
     toast('บันทึกข้อมูลรูปแปลงแล้ว');
     await reloadAll();
     const again = map.layers.flatMap(l => l.features).find(x => x.id === f.id);
     map.selected = again; showFeature(again);
   }));
+}
+
+// Values read live from LTAX: shown, never stored.
+function liveHtml(r) {
+  if (!r.found) return `<p class="pill warn">ไม่พบ ${esc(r.code)} ใน LTAX</p>`;
+  const def = ENTITIES[r.entity], v = r.values;
+  const show = (d, val) => (d.type === 'select' ? label(d.list, val) || val : val);
+  const rows = def.fields.filter(d => v[d.key] !== undefined && v[d.key] !== '' && v[d.key] !== false).map(d => `<dt>${esc(d.th)}</dt><dd>${esc(show(d, v[d.key]))}</dd>`).join('');
+  const uses = (v.uses || []).map((u, i) => `${i + 1}. ${esc(shortUse(u.usedType))}${r.entity === 'lands' ? ` ${formatRNW(u.rai, u.ngan, u.wah)}` : u.area ? ` ${formatNumber(u.area)} ตร.ม.` : ''}${u.usedBy ? ` · ${esc(u.usedBy)}` : ''}`).join('<br>');
+  const owners = (v.ownerRows || []).map(o => `${esc(o.name)}${o.psnId ? ` (${esc(o.psnId)})` : ''}`).join('<br>');
+  return `<fieldset><legend>ข้อมูลสดจาก LTAX · ${new Date(r.at).toLocaleTimeString('th-TH')}</legend>
+    <dl class="kv">${owners ? `<dt>เจ้าของ</dt><dd>${owners}</dd>` : ''}${rows}${uses ? `<dt>การใช้ประโยชน์</dt><dd>${uses}</dd>` : ''}</dl>
+    <p class="muted">แสดงอย่างเดียว ไม่ได้บันทึกเก็บใน L-LAN หรือ Supabase</p></fieldset>`;
 }
 
 function selectFeature(id) {
@@ -882,7 +904,40 @@ function renderSettings() {
   $('#setTol').value = s.areaTolerance ?? 10;
   $('#setSso').value = l.ssoUrl || ''; $('#setBase').value = l.baseUrl || ''; $('#setDelay').value = l.delayMs || 1200; $('#setPort').value = l.port || 9444;
   $('#setChrome').value = l.chromePath || ''; $('#setReal').checked = !!l.realModeEnabled;
+  const c = s.cloud || {};
+  $('#cloudUrl').value = c.url || 'https://csbsrqbqnyiiwyypxyhj.supabase.co';
+  $('#cloudKey').value = ''; $('#cloudKey').placeholder = c.hasKey ? 'บันทึก key ไว้แล้ว (ใส่ใหม่เฉพาะเมื่อจะเปลี่ยน)' : 'วางจาก Supabase → Project Settings → API Keys';
+  $('#cloudOn').checked = !!c.enabled;
+  $('#cloudState').innerHTML = `${c.hasKey ? 'มี key แล้ว' : '<span class="pill warn">ยังไม่มี key</span>'} · ส่งอัตโนมัติ: <b>${c.enabled ? 'เปิด' : 'ปิด'}</b>`
+    + `${c.lastSync ? ` · ซิงก์ล่าสุด ${new Date(c.lastSync).toLocaleString('th-TH')}` : ''}${c.dirty ? ' · <span class="pill err">มีการแก้ไขที่ยังไม่ขึ้น Supabase กด "อัปโหลดรูปทั้งหมด"</span>' : ''}`;
 }
+const cloudSettings = () => ({ url: $('#cloudUrl').value.trim(), enabled: $('#cloudOn').checked, ...($('#cloudKey').value.trim() ? { key: $('#cloudKey').value.trim() } : {}) });
+async function saveCloud() { S.settings = await api('PUT', '/api/settings', { cloud: cloudSettings() }); renderSettings(); }
+$('#cloudSql').addEventListener('click', guard(async () => {
+  const { sql } = await api('GET', '/api/cloud/schema');
+  try { await navigator.clipboard.writeText(sql); toast('คัดลอก SQL แล้ว ไปที่ Supabase → SQL Editor → New query แล้ววางและกด Run'); }
+  catch { await confirmBox(`<p>คัดลอกข้อความนี้ไปวางใน Supabase → SQL Editor แล้วกด Run</p><textarea style="height:40vh">${esc(sql)}</textarea>`, { ok: 'ปิด' }); }
+}));
+$('#cloudTest').addEventListener('click', guard(async () => {
+  await saveCloud();
+  const r = await api('GET', '/api/cloud/status');
+  $('#cloudState').innerHTML = r.ok ? `<span class="pill ok">เชื่อมต่อได้</span> ใน Supabase มี ${r.layers} ชั้น ${r.features.toLocaleString()} รูป · ในเครื่อง ${r.local.toLocaleString()} รูป` : `<span class="pill err">${esc(r.message)}</span>`;
+}));
+$('#cloudPush').addEventListener('click', guard(async () => {
+  await saveCloud();
+  if (!(await confirmBox(`อัปโหลดรูปทั้งหมด ${S.features.length.toLocaleString()} รูปขึ้น Supabase?<br><span class="muted">ส่งเฉพาะรูป รหัส พื้นที่ และช่องที่ไม่ใช่ข้อมูลส่วนบุคคล</span>`, { ok: 'อัปโหลด' }))) return;
+  $('#cloudState').textContent = 'กำลังอัปโหลด…';
+  const r = await api('POST', '/api/cloud/push');
+  toast(`อัปโหลดแล้ว ${r.layers} ชั้น ${r.features.toLocaleString()} รูป`); await loadState(); renderSettings();
+}));
+$('#cloudPull').addEventListener('click', guard(async () => {
+  await saveCloud();
+  const r0 = await api('GET', '/api/cloud/status');
+  if (!r0.ok) return toast(r0.message, true);
+  if (!(await confirmBox(`ดึงรูปจาก Supabase (${r0.features.toLocaleString()} รูป) มาแทนรูปในเครื่อง (${r0.local.toLocaleString()} รูป)?<br><span class="muted">รูปที่มีในเครื่องแต่ไม่มีใน Supabase จะหายไป ข้อมูลทะเบียนไม่ถูกแตะ</span>`, { ok: 'ดึงมาแทน', danger: true }))) return;
+  const r = await api('POST', '/api/cloud/pull');
+  toast(`ดึงแล้ว ${r.layers} ชั้น ${r.features.toLocaleString()} รูป`); refreshMap.fitted = false; await reloadAll(); renderSettings();
+}));
 $('#setSave').addEventListener('click', guard(async () => {
   if ($('#setReal').checked && !S.settings.ltax?.realModeEnabled && !(await confirmBox('เปิดโหมดบันทึกจริงลง LTAX ONLINE?<br><span class="muted">L-LAN จะกดบันทึกในระบบจริงได้เมื่อสั่งงานแบบ "บันทึกจริง" เท่านั้น</span>'))) return;
   S.settings = await api('PUT', '/api/settings', {
@@ -890,7 +945,9 @@ $('#setSave').addEventListener('click', guard(async () => {
     areaTolerance: Number($('#setTol').value) || 10,
     ltax: { ssoUrl: $('#setSso').value.trim(), baseUrl: $('#setBase').value.trim(), delayMs: Number($('#setDelay').value) || 1200, port: Number($('#setPort').value) || 9444,
       chromePath: $('#setChrome').value.trim(), realModeEnabled: $('#setReal').checked },
+    cloud: cloudSettings(),
   });
+  renderSettings();
   await loadState(); await loadIssues();
   $('#setMsg').textContent = 'บันทึกแล้ว';
 }));

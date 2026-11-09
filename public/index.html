@@ -263,6 +263,20 @@
           <p class="muted">โหมดบันทึกจริงทดสอบกับ LTAX จำลองแล้ว แต่ยังไม่เคยทดสอบกับระบบจริง ควรทดลองกับ 1 รายการที่ตรวจได้ก่อน แล้วเปิดดูใน LTAX ว่าถูกต้อง</p>
         </div>
       </div>
+      <div class="panel">
+        <h3>Supabase: เก็บรูปแปลงและรูปอาคารออนไลน์</h3>
+        <p class="muted">Supabase เก็บเฉพาะรูป รหัสแปลง/อาคาร พื้นที่ และช่องที่ไม่ใช่ข้อมูลส่วนบุคคล ระบบจะตัดช่องชื่อเจ้าของ เลขบัตร ที่อยู่ และโทรศัพท์ออกก่อนส่งทุกครั้ง ข้อมูลทะเบียนให้ดูสดจาก LTAX</p>
+        <div class="form-row"><label>Project URL</label><input id="cloudUrl" placeholder="https://xxxx.supabase.co"></div>
+        <div class="form-row"><label>Secret key (service_role)</label><input id="cloudKey" type="password" autocomplete="off" placeholder="วางจาก Supabase → Project Settings → API Keys"></div>
+        <label class="check"><input type="checkbox" id="cloudOn"> ส่งรูปขึ้น Supabase ทุกครั้งที่วาด แก้ ลบ หรือนำเข้า</label>
+        <div class="row">
+          <button id="cloudSql">คัดลอก SQL สร้างตาราง</button>
+          <button id="cloudTest">ทดสอบการเชื่อมต่อ</button>
+          <button id="cloudPush">อัปโหลดรูปทั้งหมดขึ้น Supabase</button>
+          <button id="cloudPull">ดึงรูปจาก Supabase มาแทนในเครื่อง</button>
+        </div>
+        <div id="cloudState" class="state"></div>
+      </div>
       <div class="row"><button id="setSave" class="primary">บันทึกการตั้งค่า</button><span id="setMsg" class="muted"></span></div>
       <p class="muted" id="dataDir"></p>
     </section>

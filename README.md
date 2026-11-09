@@ -87,6 +87,49 @@
    - Excel: ใช้หัวคอลัมน์เดียวกับไฟล์ที่ส่งออกจาก LTAX จึงนำกลับเข้ามาได้ พร้อมชีตผลตรวจ รายการรอส่ง และรายงานการจอย/ซ้อนทับ
    - .shp: ใช้ระบบพิกัดเดิมของชั้น และเพิ่มช่องข้อมูลทะเบียนที่จอยแล้ว
 
+## Supabase: เก็บรูปแปลงออนไลน์ โดยไม่เก็บข้อมูลสำคัญ
+
+**แบ่งหน้าที่ข้อมูล:**
+- **Supabase เก็บเฉพาะรูป:** รูปแปลงและรูปอาคาร (PostGIS) รหัสแปลง/อาคาร พื้นที่ และช่องที่ไม่ใช่ข้อมูลส่วนบุคคล
+  - ระบบตัดช่องที่ชื่อมีคำว่า owner, name, id_card, psn, tel, addr ฯลฯ ออกก่อนส่งทุกครั้ง
+- **ข้อมูลทะเบียนดูสดจาก LTAX:** ปุ่ม "⟳ ดูข้อมูลสดจาก LTAX" ในแผงแปลงจะอ่านค่าปัจจุบันจาก LTAX ONLINE มาแสดง โดยไม่บันทึกเก็บที่ไหน
+
+**ตั้งค่าครั้งแรก:**
+1. **สร้างตาราง:** Supabase → SQL Editor → New query → วางเนื้อหาไฟล์ `supabase/schema.sql` แล้วกด Run (หรือกด "คัดลอก SQL สร้างตาราง" ในหน้าตั้งค่า)
+   - ได้ตาราง `llan_layers`, `llan_features` (มีคอลัมน์ `geom` สำหรับเปิดใน QGIS) และ `llan_feature_log`
+   - ทุกตารางเปิด RLS และไม่มี policy สาธารณะ
+2. **ใส่ key:** L-LAN → ตั้งค่า → Supabase
+   - ใส่ Project URL และ secret key (service_role) จาก Supabase → Project Settings → API Keys
+   - key เก็บใน `data/settings.json` ในเครื่องเท่านั้น ไม่ส่งกลับไปหน้าเว็บ และไม่ขึ้น GitHub
+3. **อัปโหลดครั้งแรก:** กด "ทดสอบการเชื่อมต่อ" → "อัปโหลดรูปทั้งหมดขึ้น Supabase"
+   - เปิด "ส่งรูปขึ้น Supabase ทุกครั้งที่วาด แก้ ลบ หรือนำเข้า" เพื่อให้ส่งอัตโนมัติ
+   - ถ้าส่งไม่สำเร็จ งานในเครื่องยังบันทึกอยู่ และหน้าตั้งค่าจะเตือนให้อัปโหลดใหม่
+4. **ใช้กับเครื่องอื่น:** กด "ดึงรูปจาก Supabase มาแทนในเครื่อง" เพื่อใช้รูปชุดเดียวกัน
+
+## L-LAN Web (เปิดผ่านเว็บได้ทุกที่)
+
+L-LAN Web คือเว็บแบบ static ใช้ดู วาด และแก้รูปแปลง/อาคารใน Supabase โดยตรง ล็อกอินด้วยบัญชี Supabase Auth
+- **ข้อมูลบนเว็บ:** ไม่มีข้อมูลส่วนบุคคล การดูข้อมูลทะเบียนสดและการส่งเข้า LTAX ยังทำที่ L-LAN ในสำนักงาน
+- **สิทธิ์:** คุมด้วย `llan_members` มี 3 ระดับ คือ viewer (ดูอย่างเดียว), editor (แก้ไขได้), admin (ผู้ดูแล)
+  - คนที่ล็อกอินได้แต่ไม่อยู่ในรายชื่อจะไม่เห็นข้อมูลใด ๆ
+
+**วิธีตั้งค่า:**
+1. **สร้างตาราง:** รัน `supabase/schema.sql` แล้วตามด้วย `supabase/web-access.sql` ใน SQL Editor
+2. **เพิ่มรายชื่อสมาชิก:**
+   `insert into public.llan_members (email, role) values ('อีเมล', 'admin');`
+3. **เชิญผู้ใช้:** Supabase → Authentication → Users → Invite user ใส่อีเมลเดียวกัน
+   - ควรปิด "Allow new users to sign up" ใน Authentication → Sign In / Providers
+4. **ฝากเว็บ:** Cloudflare Pages หรือ Netlify รองรับ repo ส่วนตัวได้ฟรี
+   - Build command: `node scripts/build-web.mjs`
+   - Output: `dist-web`
+   - ตัวแปรที่ต้องตั้ง: `LLAN_SUPABASE_URL` และ `LLAN_SUPABASE_KEY` ใช้ **publishable/anon key** เท่านั้น ห้ามใช้ secret key (สคริปต์ build จะปฏิเสธ secret key)
+5. **ตั้ง URL:** ใส่ URL ของเว็บใน Supabase → Authentication → URL Configuration (Site URL / Redirect URLs) เพื่อให้ลิงก์เชิญและลิงก์ลืมรหัสผ่านพากลับมาที่เว็บ
+
+**ทดลองในเครื่อง:**
+1. คัดลอก `web/config.example.js` เป็น `web/config.js` แล้วใส่ publishable key
+2. รัน `node scripts/build-web.mjs`
+3. เปิดโฟลเดอร์ `dist-web` ผ่านเว็บเซิร์ฟเวอร์ใดก็ได้
+
 ## ใช้งานหลายอุปกรณ์
 
 หน้าจอปรับตามขนาดเครื่อง:

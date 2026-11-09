@@ -4,10 +4,13 @@
   "private": true,
   "description": "L-LAN: จัดการข้อมูลภาษีที่ดินและสิ่งปลูกสร้าง แผนที่สำรวจ และส่งข้อมูลเข้า LTAX ONLINE",
   "type": "module",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "start": "node server.mjs",
     "mock-ltax": "node mock-ltax/server.mjs 4390",
-    "test": "node --test \"tests/*.test.mjs\""
+    "test": "node --test \"tests/*.test.mjs\"",
+    "build-web": "node scripts/build-web.mjs"
   }
 }

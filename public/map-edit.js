@@ -142,6 +142,7 @@ export function setupMapEditing({ map, S, api, esc, toast, guard, confirmBox, re
     const land = S.landByCode.get(code);
     if (!(await confirmBox(`บันทึกรูปแปลงใหม่ <b>${esc(code || '(ไม่มีรหัส)')}</b> เนื้อที่ ${formatNumber(area / 4)} ตร.ว.?${land ? `<br>จะผูกกับที่ดินในทะเบียนของ ${esc(ownerNames(land.ownerIds) || '-')}` : ''}`))) return;
     const f = await api('POST', '/api/features', { kind: 'parcel', code, geometry });
+    if (f.cloudWarning) toast(f.cloudWarning, true);
     resetTool();
     await reloadAll(); selectFeature(f.id);
     if (land) toast(`ผูกรูปกับที่ดิน ${code} ในทะเบียนแล้ว`);
@@ -172,6 +173,7 @@ export function setupMapEditing({ map, S, api, esc, toast, guard, confirmBox, re
     const existing = S.buildingByCode.get(code);
     if (!(await confirmBox(`บันทึกรูปอาคาร <b>${esc(code || '(ไม่มีรหัส)')}</b> ขนาด ${width.toFixed(2)} × ${length.toFixed(2)} ม.?${existing ? '<br>จะผูกกับสิ่งปลูกสร้างในทะเบียนที่มีอยู่' : ''}`))) return;
     const f = await api('POST', '/api/features', { kind: 'building', code, geometry });
+    if (f.cloudWarning) toast(f.cloudWarning, true);
     resetTool();
     await reloadAll(); selectFeature(f.id);
     const floors = Math.max(1, Number(res.floors) || 1);
@@ -188,7 +190,9 @@ export function setupMapEditing({ map, S, api, esc, toast, guard, confirmBox, re
     const ring = (geometry.type === 'Polygon' ? geometry.coordinates[0] : geometry.coordinates[draw.part][0]).slice(0, -1);
     const warn = selfIntersects(ring) ? '<br><span class="pill err">เส้นของรูปตัดกันเอง</span>' : '';
     if (!(await confirmBox(`บันทึกการแก้รูป <b>${esc(feature.code || '(ไม่มีรหัส)')}</b>?<br>พื้นที่ ${formatNumber(before)} → <b>${formatNumber(after)}</b> ตร.ม. (${formatNumber(before / 4)} → ${formatNumber(after / 4)} ตร.ว.)${warn}`, { ok: 'บันทึกรูป' }))) return;
-    await api('PUT', `/api/features/${feature.id}`, { geometry });
+    const saved = await api('PUT', `/api/features/${feature.id}`, { geometry });
+    if (saved.cloudWarning) toast(saved.cloudWarning, true);
+    if (f.cloudWarning) toast(f.cloudWarning, true);
     resetTool();
     toast('บันทึกรูปแล้ว');
     await reloadAll(); selectFeature(feature.id);
@@ -204,7 +208,8 @@ export function setupMapEditing({ map, S, api, esc, toast, guard, confirmBox, re
     },
     async deleteShape(f) {
       if (!(await confirmBox(`ลบรูป <b>${esc(f.code || '(ไม่มีรหัส)')}</b> ออกจากแผนที่?<br><span class="muted">ข้อมูลทะเบียนไม่ถูกลบ ลบเฉพาะรูปใน L-LAN</span>`, { ok: 'ลบรูป', danger: true }))) return;
-      await api('DELETE', `/api/features/${f.id}`);
+      const del = await api('DELETE', `/api/features/${f.id}`);
+      if (del.cloudWarning) toast(del.cloudWarning, true);
       map.selected = null;
       toast('ลบรูปแล้ว');
       await reloadAll(); selectFeature(null);

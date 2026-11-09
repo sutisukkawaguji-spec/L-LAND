@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>L-LAN Web</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><img src="icon.svg" alt=""><b>L-LAN Web</b><span class="sub">แผนที่แปลงที่ดินและอาคาร</span></div>
+    <span class="grow"></span>
+    <div class="user-chip" id="userChip"></div>
+  </header>
+
+  <div class="login" id="login">
+    <form class="login-box" id="loginForm">
+      <img src="icon.svg" alt="">
+      <h2>เข้าสู่ระบบ L-LAN Web</h2>
+      <p class="muted">ใช้อีเมลและรหัสผ่านที่ผู้ดูแลเชิญไว้</p>
+      <input id="loginEmail" type="email" placeholder="อีเมล" autocomplete="username" required>
+      <input id="loginPass" type="password" placeholder="รหัสผ่าน" autocomplete="current-password" required>
+      <button class="primary big">เข้าสู่ระบบ</button>
+      <div id="loginState" class="state"></div>
+      <button type="button" class="link" id="forgot">ลืมรหัสผ่าน</button>
+    </form>
+  </div>
+
+  <main>
+    <section class="tab on" id="tab-map">
+      <div class="map-wrap">
+        <canvas id="map"></canvas>
+        <div class="map-tools" id="mapTools">
+          <div class="search-row">
+            <input id="mapSearch" type="search" placeholder="ค้นหา รหัสแปลง / รหัสอาคาร" list="mapSearchList">
+            <button id="toolsToggle" title="แสดง/ซ่อนตัวเลือกแผนที่">☰</button>
+          </div>
+          <datalist id="mapSearchList"></datalist>
+          <div class="tools-body">
+            <div class="row">
+              <label>พื้นหลัง
+                <select id="mapBase"><option value="satellite">ภาพดาวเทียม</option><option value="osm">แผนที่ OSM</option><option value="none">ไม่มี</option></select>
+              </label>
+              <button id="reload" title="โหลดรูปล่าสุดจาก Supabase">⟳ โหลดใหม่</button>
+            </div>
+            <div id="mapLegend" class="legend"></div>
+          </div>
+        </div>
+        <div class="map-bar" id="mapBar">
+          <button data-tool="select" class="on" title="เลือกและเลื่อนแผนที่">✋<span>เลือก</span></button>
+          <button data-tool="parcel" class="edit-only" title="วาดรูปแปลงที่ดิน">⬠<span>วาดแปลง</span></button>
+          <button data-tool="building-rect" class="edit-only" title="วาดอาคารสี่เหลี่ยม 3 จุด">▭<span>อาคาร 3 จุด</span></button>
+          <button data-tool="building-poly" class="edit-only" title="วาดอาคารหลายเหลี่ยม">⬡<span>อาคารอิสระ</span></button>
+          <hr>
+          <button id="snapBtn" class="on" title="ดูดติดจุดและเส้นของรูปข้างเคียง">🧲<span>Snap</span></button>
+          <button id="gpsBtn" title="ตำแหน่งของฉัน">◎<span>GPS</span></button>
+          <hr>
+          <button id="zoomIn" title="ขยาย">＋</button>
+          <button id="zoomOut" title="ย่อ">－</button>
+          <button id="zoomFit" title="ดูทั้งพื้นที่">⤢</button>
+        </div>
+        <div class="draw-bar" id="drawBar" hidden>
+          <span id="drawStatus"></span>
+          <div class="row">
+            <button id="drawGps">＋ จุด GPS</button>
+            <button id="drawUndo">↶ ย้อน</button>
+            <button id="drawDelVertex">ลบจุด</button>
+            <button id="drawCancel" class="danger">✕ ยกเลิก</button>
+            <button id="drawFinish" class="primary">✓ เสร็จ</button>
+          </div>
+        </div>
+      </div>
+      <aside class="side" id="mapSide"><div class="empty">แตะรูปแปลงหรืออาคารเพื่อดูข้อมูล</div></aside>
+    </section>
+  </main>
+
+  <dialog id="shapeBox" class="confirm wide"><form method="dialog" id="shapeForm"></form></dialog>
+  <dialog id="confirmBox" class="confirm"><form method="dialog"><div id="confirmText"></div><div class="row end"><button value="no">ยกเลิก</button><button value="yes" class="primary">ยืนยัน</button></div></form></dialog>
+  <div id="toast" class="toast" hidden></div>
+  <script type="module" src="web.js"></script>
+</body>
+</html>
