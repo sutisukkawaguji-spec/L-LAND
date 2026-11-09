@@ -1,0 +1,39 @@
+# Builds L-LAN Web (web/ + shared modules) and publishes it with GitHub Pages on every push to main.
+name: L-LAN Web on GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Supabase URL and publishable key come from web/config.js, or from repository variables when set.
+      - run: node scripts/build-web.mjs
+        env:
+          LLAN_SUPABASE_URL: ${{ vars.LLAN_SUPABASE_URL }}
+          LLAN_SUPABASE_KEY: ${{ vars.LLAN_SUPABASE_KEY }}
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist-web
+      - id: deployment
+        uses: actions/deploy-pages@v4

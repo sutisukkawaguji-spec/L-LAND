@@ -209,7 +209,7 @@ export class MapView {
       return { d: Math.hypot(a.x - b.x, a.y - b.y), cx: (a.x + b.x) / 2, cy: (a.y + b.y) / 2 };
     };
     c.addEventListener('pointerdown', e => {
-      c.setPointerCapture(e.pointerId);
+      try { c.setPointerCapture(e.pointerId); } catch { /* not every input source can be captured */ }
       pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (pointers.size === 2) { // second finger: pinch zoom, cancel any drag
         const s = pinchState(), r = c.getBoundingClientRect();

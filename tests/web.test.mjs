@@ -99,10 +99,15 @@ test('L-LAN Web: sign in, see shapes, draw and delete a building', { skip: !find
 
     // Draw a 3-point building in the middle of the parcel
     const [cx, cy] = await ev(`(() => { const r = document.querySelector('#map').getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`);
-    const click = async (px, py) => { for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) await p.send('Input.dispatchMouseEvent', { type, x: px, y: py, button: 'left', clickCount: 1, buttons: type === 'mousePressed' ? 1 : 0 }); await sleep(200); };
+    // Taps go straight to the map canvas as pointer events (CDP mouse input is unreliable in headless Chrome).
+    const click = async (px, py) => { await ev(`(() => { const c = document.querySelector('#map'); for (const type of ['pointerdown', 'pointerup']) c.dispatchEvent(new PointerEvent(type, { clientX: ${px}, clientY: ${py}, pointerId: 1, isPrimary: true, pointerType: 'mouse', button: 0, buttons: type === 'pointerdown' ? 1 : 0, bubbles: true })); })()`); await sleep(200); };
     await ev(`document.querySelector('#mapBar [data-tool="building-rect"]').click()`); await sleep(300);
+    await ev(`window.__pe = []; for (const t of ['pointerdown', 'pointerup']) document.querySelector('#map').addEventListener(t, e => __pe.push(t[7] + e.pointerId))`);
+    const hitEl = await ev(`(() => { const el = document.elementFromPoint(${cx}, ${cy}); return el.id || el.className || el.tagName; })()`);
     await click(cx - 60, cy + 40); await click(cx + 60, cy + 40); await click(cx, cy - 30); await sleep(500);
-    assert.equal(await ev(`document.querySelector('#shapeForm [name=code]').value`), '99A001-B001');
+    for (let i = 0; i < 25 && !(await ev(`!!document.querySelector('#shapeForm [name=code]')`)); i++) await sleep(200);
+    const diag = await ev(`JSON.stringify({ toast: document.querySelector('#toast').hidden ? '' : document.querySelector('#toast').textContent, bar: document.querySelector('#drawStatus').textContent, legend: document.querySelector('#mapLegend').textContent, pe: window.__pe, dlg: [...document.querySelectorAll('dialog[open]')].map(d => d.id), focus: document.hasFocus(), vis: document.visibilityState })`) + ' hit=' + hitEl;
+    assert.equal(await ev(`document.querySelector('#shapeForm [name=code]')?.value`), '99A001-B001', diag);
     await ev(`document.querySelector('#shapeForm button[value=save]').click()`); await sleep(300);
     await ev(`document.querySelector('#confirmBox button[value=yes]').click()`); await sleep(1500);
     const built = [...fake.t.llan_features.values()].find(f => f.code === '99A001-B001');
