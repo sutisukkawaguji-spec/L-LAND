@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>L-LAN</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><img src="icon.svg" alt=""><b>L-LAN</b><span class="sub">จัดการข้อมูลภาษีที่ดินและสิ่งปลูกสร้าง</span></div>
+    <nav class="tabs" id="tabs">
+      <button data-tab="map" class="on">แผนที่</button>
+      <button data-tab="registry">ทะเบียน</button>
+      <button data-tab="checks">ตรวจสอบ <span class="badge" id="badgeErrors"></span></button>
+      <button data-tab="changes">สรุปการแก้ไข <span class="badge" id="badgePending"></span></button>
+      <button data-tab="ltax">ส่งเข้า LTAX</button>
+      <button data-tab="data">นำเข้า / ส่งออก</button>
+      <button data-tab="settings">ตั้งค่า</button>
+    </nav>
+    <button class="job-chip" id="jobChip" hidden onclick="document.querySelector(&quot;#tabs button[data-tab=ltax]&quot;).click()"></button>
+    <div class="ltax-chip" id="ltaxChip" title="สถานะการเชื่อมต่อ LTAX ONLINE">LTAX: -</div>
+    <div class="user-chip" id="userChip"></div>
+  </header>
+
+  <div class="login" id="login" hidden>
+    <div class="login-box">
+      <img src="icon.svg" alt="">
+      <h2>เข้าสู่ระบบ L-LAN</h2>
+      <p class="muted">ใช้บัญชีเดียวกับ LTAX ONLINE (DLA Single Sign-on) กรอกชื่อผู้ใช้ รหัสผ่าน และ OTP ในหน้าต่างที่เปิดขึ้น L-LAN ไม่เก็บรหัสผ่าน</p>
+      <button class="primary big" id="loginSso">เข้าสู่ระบบด้วย DLA SSO</button>
+      <div id="loginState" class="state"></div>
+      <button class="link" id="loginOffline">ใช้งานแบบออฟไลน์ (ข้อมูลในเครื่องเท่านั้น ส่งเข้า LTAX ไม่ได้)</button>
+    </div>
+  </div>
+
+  <main>
+    <!-- แผนที่ -->
+    <section class="tab on" id="tab-map">
+      <div class="map-wrap">
+        <canvas id="map"></canvas>
+        <div class="map-tools" id="mapTools">
+          <div class="search-row">
+            <input id="mapSearch" type="search" placeholder="ค้นหา รหัสแปลง / รหัสอาคาร / ชื่อเจ้าของ" list="mapSearchList">
+            <button id="toolsToggle" title="แสดง/ซ่อนตัวเลือกแผนที่">☰</button>
+          </div>
+          <datalist id="mapSearchList"></datalist>
+          <div class="tools-body">
+          <div class="row">
+            <label>สีแปลงตาม
+              <select id="mapColor">
+                <option value="link">การเชื่อมต่อข้อมูล</option>
+                <option value="saved">สถานะบันทึกเข้า LTAX</option>
+                <option value="join">การจอยกับทะเบียน</option>
+                <option value="pending">รอส่ง LTAX</option>
+                <option value="issues">ผลตรวจสอบ</option>
+                <option value="use">การใช้ประโยชน์</option>
+                <option value="overlay">อาคารตรงแปลง</option>
+              </select>
+            </label>
+            <label>พื้นหลัง
+              <select id="mapBase">
+                <option value="none">ไม่มี</option>
+                <option value="osm">แผนที่ OSM</option>
+                <option value="satellite">ภาพดาวเทียม</option>
+              </select>
+            </label>
+          </div>
+          <div id="layerToggles" class="row wrap"></div>
+          <div id="mapLegend" class="legend"></div>
+          </div>
+        </div>
+        <div class="map-bar" id="mapBar">
+          <button data-tool="select" class="on" title="เลือกและเลื่อนแผนที่">✋<span>เลือก</span></button>
+          <button data-tool="multi" title="เลือกหลายแปลง: แตะรูปเพื่อเพิ่มหรือเอาออก แล้วสั่งตรวจ/ส่งเข้า LTAX พร้อมกัน">☑<span>เลือกหลายแปลง</span></button>
+          <button data-tool="parcel" title="วาดรูปแปลงที่ดิน: คลิกทีละมุม ดับเบิลคลิกหรือกดเสร็จเพื่อจบ">⬠<span>วาดแปลง</span></button>
+          <button data-tool="building-rect" title="วาดอาคารสี่เหลี่ยม: คลิกมุม 2 จุดของด้านหนึ่ง แล้วคลิกด้านตรงข้าม">▭<span>อาคาร 3 จุด</span></button>
+          <button data-tool="building-poly" title="วาดอาคารหลายเหลี่ยม">⬡<span>อาคารอิสระ</span></button>
+          <hr>
+          <button id="snapBtn" class="on" title="ดูดติดจุดและเส้นของรูปข้างเคียง">🧲<span>Snap</span></button>
+          <button id="gpsBtn" title="แสดงตำแหน่งของฉันจาก GPS">◎<span>GPS</span></button>
+          <hr>
+          <button id="zoomIn" title="ขยาย">＋</button>
+          <button id="zoomOut" title="ย่อ">－</button>
+          <button id="zoomFit" title="ดูทั้งพื้นที่">⤢</button>
+        </div>
+        <div class="draw-bar" id="drawBar" hidden>
+          <span id="drawStatus"></span>
+          <div class="row">
+            <button id="drawGps" title="เพิ่มจุดที่ตำแหน่ง GPS ปัจจุบัน">＋ จุด GPS</button>
+            <button id="drawUndo" title="ย้อน (Ctrl+Z)">↶ ย้อน</button>
+            <button id="drawDelVertex" title="ลบจุดที่เลือก (Delete)">ลบจุด</button>
+            <button id="drawCancel" class="danger">✕ ยกเลิก</button>
+            <button id="drawFinish" class="primary">✓ เสร็จ</button>
+          </div>
+        </div>
+        <div class="map-tip" id="mapTip" hidden></div>
+      </div>
+      <aside class="side" id="mapSide">
+        <div class="empty">คลิกรูปแปลงหรืออาคารบนแผนที่เพื่อดูข้อมูล</div>
+      </aside>
+    </section>
+
+    <!-- ทะเบียน -->
+    <section class="tab" id="tab-registry">
+      <div class="toolbar">
+        <div class="seg" id="regEntity">
+          <button data-e="lands" class="on">ที่ดิน</button>
+          <button data-e="buildings">สิ่งปลูกสร้าง</button>
+          <button data-e="owners">เจ้าของ</button>
+          <button data-e="signboards">ป้าย</button>
+        </div>
+        <input id="regSearch" type="search" placeholder="ค้นหา">
+        <select id="regFilter">
+          <option value="">ทั้งหมด</option>
+          <option value="pending">รอส่ง LTAX</option>
+          <option value="create">ยังไม่มีใน LTAX</option>
+          <option value="error">มีข้อผิดพลาด</option>
+          <option value="noshape">ไม่มีรูปแปลงในแผนที่</option>
+          <option value="noprice">ยังไม่มีราคาประเมิน</option>
+          <option value="saved">บันทึกเข้า LTAX แล้ว</option>
+          <option value="pusherr">ส่งเข้า LTAX ผิดพลาดครั้งล่าสุด</option>
+        </select>
+        <span class="grow"></span>
+        <button id="regAdd" class="primary">+ เพิ่ม</button>
+      </div>
+      <div class="actions" id="regActions" hidden>
+        <b id="regSelCount"></b>
+        <button data-op="check">ตรวจข้อมูล</button>
+        <button data-op="ltax-check">ตรวจว่ามีใน LTAX</button>
+        <button data-op="push-dry">ทดลองกรอก LTAX</button>
+        <button data-op="push-real" class="danger">บันทึกเข้า LTAX</button>
+        <button data-op="pull">ดึงจาก LTAX</button>
+        <button data-op="prices">เติมราคาประเมิน</button>
+        <button data-op="map">ดูบนแผนที่</button>
+        <button data-op="delete" class="danger">ลบ</button>
+        <button data-op="clear" class="link">ล้างการเลือก</button>
+      </div>
+      <div class="table-wrap"><table class="grid" id="regTable"></table></div>
+      <div class="pager" id="regPager"></div>
+    </section>
+
+    <!-- ตรวจสอบ -->
+    <section class="tab" id="tab-checks">
+      <div class="toolbar">
+        <select id="chkLevel"><option value="">ทุกระดับ</option><option value="error">ผิดพลาด (ส่งไม่ได้)</option><option value="warn">เตือน</option></select>
+        <select id="chkEntity"><option value="">ทุกประเภท</option><option value="lands">ที่ดิน</option><option value="buildings">สิ่งปลูกสร้าง</option><option value="owners">เจ้าของ</option><option value="signboards">ป้าย</option><option value="parcels">รูปแปลง</option></select>
+        <input id="chkSearch" type="search" placeholder="ค้นหาข้อความ">
+        <span class="grow"></span>
+        <button id="chkRefresh">ตรวจใหม่</button>
+      </div>
+      <div class="cards" id="chkSummary"></div>
+      <div class="table-wrap"><table class="grid" id="chkTable"></table></div>
+      <div class="pager" id="chkPager"></div>
+    </section>
+
+    <!-- สรุปการแก้ไข -->
+    <section class="tab" id="tab-changes">
+      <div class="toolbar">
+        <div class="seg" id="chgView"><button data-v="pending" class="on">รายการที่ต่างจาก LTAX</button><button data-v="log">ประวัติการแก้ไขทั้งหมด</button></div>
+        <span class="grow"></span>
+        <button id="chgSendSel" class="primary">ส่งรายการที่เลือกเข้า LTAX…</button>
+      </div>
+      <div class="cards" id="chgSummary"></div>
+      <div id="chgList" class="list"></div>
+    </section>
+
+    <!-- LTAX -->
+    <section class="tab" id="tab-ltax">
+      <div class="ltax-grid">
+        <div class="panel">
+          <h3>1. เข้าสู่ระบบ LTAX ONLINE</h3>
+          <p class="muted">L-LAN เปิด Chrome หน้าต่างแยก (โปรไฟล์ของ L-LAN เอง) ให้เข้าสู่ระบบ DLA SSO ด้วยชื่อผู้ใช้ รหัสผ่าน และ OTP ตามปกติ L-LAN ไม่เก็บรหัสผ่าน</p>
+          <div class="row"><button id="ltaxOpen" class="primary">เปิดหน้าต่างเข้าสู่ระบบ</button><button id="ltaxEnter">เข้า LTAX ONLINE</button><button id="ltaxCheck">ตรวจสถานะ</button></div>
+          <div id="ltaxState" class="state"></div>
+        </div>
+        <div class="panel">
+          <h3>2. สร้างงาน</h3>
+          <div class="form-row"><label>งาน</label>
+            <select id="jobType"><option value="push">ส่งข้อมูลจาก L-LAN เข้า LTAX</option><option value="pull">ดึงข้อมูลจาก LTAX มาที่ L-LAN</option><option value="check">ตรวจว่ารหัสแปลง/อาคารมีใน LTAX (ค้นหาอย่างเดียว)</option></select></div>
+          <div class="form-row"><label>โหมด</label>
+            <select id="jobMode"><option value="dry">ทดลอง: กรอกและเทียบกับ LTAX แต่ไม่บันทึก</option><option value="real">บันทึกจริงลง LTAX</option></select></div>
+          <div class="form-row"><label>รายการ</label>
+            <select id="jobScope"><option value="pending">ทุกรายการที่รอส่ง (ผ่านการตรวจ)</option><option value="selected">เฉพาะที่เลือกในหน้าสรุปการแก้ไข</option><option value="lands-all">ที่ดินทั้งหมด (สำหรับดึงข้อมูล)</option>
+              <option value="parcels-unchecked">รูปแปลงในแผนที่ที่ยังไม่เคยตรวจกับ LTAX</option><option value="parcels-unjoined">รูปแปลงที่จอยกับทะเบียนไม่ได้</option>
+              <option value="parcels-all">รูปแปลงในแผนที่ทั้งหมด</option><option value="buildings-shapes">รูปอาคารในแผนที่ทั้งหมด</option></select></div>
+          <div class="form-row"><label>เริ่มที่ลำดับ</label><input id="jobFrom" type="number" min="1" value="1"></div>
+          <div class="form-row"><label>จำนวนต่อรอบ</label><input id="jobLimit" type="number" min="1" value="20"></div>
+          <p class="muted" id="jobHint"></p>
+          <div class="row"><button id="jobStart" class="primary">เริ่มงาน</button><button id="jobResume" disabled title="ทำรายการที่ยังไม่สำเร็จของงานที่แสดงอยู่">↻ ทำต่อรายการที่ค้าง/ผิดพลาด</button><button id="jobStop" class="danger" disabled>หยุด</button></div>
+          <p class="muted">กดเริ่มงานซ้ำเพื่อทำรอบถัดไปได้เลย ระบบจำลำดับที่ทำถึงไว้ให้แยกตามประเภทงานและรายการ</p>
+        </div>
+      </div>
+      <div class="panel">
+        <h3>ความคืบหน้า</h3>
+        <div class="progress"><div id="jobBar"></div></div>
+        <div id="jobInfo" class="muted"></div>
+        <div class="table-wrap short"><table class="grid" id="jobItems"></table></div>
+      </div>
+      <div class="panel">
+        <h3>งานที่ผ่านมา</h3>
+        <div class="table-wrap short"><table class="grid" id="jobHistory"></table></div>
+      </div>
+    </section>
+
+    <!-- นำเข้า / ส่งออก -->
+    <section class="tab" id="tab-data">
+      <div class="ltax-grid">
+        <div class="panel">
+          <h3>นำเข้า Excel ที่ส่งออกจาก LTAX ONLINE</h3>
+          <p class="muted">ไฟล์ที่มีชีต owner, land, land_detail, building, building_detail, sign นำเข้าซ้ำได้ รายการที่แก้ในเครื่องแล้วจะไม่ถูกทับ</p>
+          <input type="file" id="xlsxFile" accept=".xlsx">
+          <div class="row"><button id="xlsxPreview">ตรวจไฟล์ก่อน</button><button id="xlsxImport" class="primary">นำเข้า</button></div>
+          <div id="xlsxResult" class="result"></div>
+        </div>
+        <div class="panel">
+          <h3>นำเข้าแผนที่ (.shp)</h3>
+          <p class="muted">เลือกไฟล์ .shp .dbf .shx .prj .cpg ของชั้นเดียวกันพร้อมกัน ระบบพิกัดอ่านจาก .prj (WGS84 / UTM 47-48 / Indian 1975)</p>
+          <input type="file" id="shpFiles" multiple accept=".shp,.dbf,.shx,.prj,.cpg">
+          <div class="form-row"><label>ชนิดชั้น</label><select id="shpKind"><option value="">อัตโนมัติ</option><option value="parcel">รูปแปลงที่ดิน</option><option value="building">รูปสิ่งปลูกสร้าง</option><option value="other">อื่น ๆ</option></select></div>
+          <div class="form-row"><label>ช่องรหัส</label><input id="shpCode" placeholder="อัตโนมัติ เช่น parcel_cod, building_c"></div>
+          <div class="form-row"><label>ระบบพิกัด</label><select id="shpCrs"><option value="">อ่านจาก .prj</option></select></div>
+          <div class="row"><button id="shpImport" class="primary">นำเข้าแผนที่</button></div>
+          <div id="shpResult" class="result"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <h3>ชั้นแผนที่ในเครื่อง</h3>
+        <div class="table-wrap short"><table class="grid" id="layerTable"></table></div>
+      </div>
+      <div class="ltax-grid">
+        <div class="panel">
+          <h3>ส่งออก</h3>
+          <p class="muted">Excel มีชีตแบบเดียวกับที่ส่งออกจาก LTAX (นำกลับเข้ามาได้) พร้อมผลตรวจสอบ รายการรอส่ง และรายงานการจอย / ซ้อนทับ</p>
+          <div class="row"><a class="button primary" href="/api/export/xlsx">ส่งออก Excel</a></div>
+        </div>
+        <div class="panel">
+          <h3>รายงานการจอยและการซ้อนทับ</h3>
+          <div id="joinReport" class="result"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ตั้งค่า -->
+    <section class="tab" id="tab-settings">
+      <div class="ltax-grid">
+        <div class="panel">
+          <h3>หน่วยงาน</h3>
+          <div class="form-row"><label>ชื่อ อปท.</label><input id="setOrg"></div>
+          <div class="form-row"><label>อำเภอเริ่มต้น</label><input id="setAmphur"></div>
+          <div class="form-row"><label>ตำบลในเขต (คั่นด้วย ,)</label><input id="setDistricts"></div>
+          <div class="form-row"><label>ยอมให้เนื้อที่เอกสารต่างจากแผนที่ (%)</label><input id="setTol" type="number" min="1" max="100"></div>
+        </div>
+        <div class="panel">
+          <h3>LTAX ONLINE</h3>
+          <div class="form-row"><label>หน้าเข้าสู่ระบบ SSO</label><input id="setSso"></div>
+          <div class="form-row"><label>ที่อยู่ LTAX</label><input id="setBase"></div>
+          <div class="form-row"><label>พักระหว่างรายการ (มิลลิวินาที)</label><input id="setDelay" type="number" min="300"></div>
+          <div class="form-row"><label>พอร์ตควบคุม Chrome</label><input id="setPort" type="number"></div>
+          <div class="form-row"><label>ที่อยู่ Chrome (ถ้าไม่ใช่ที่ปกติ)</label><input id="setChrome"></div>
+          <label class="check warn"><input type="checkbox" id="setReal"> เปิดโหมดบันทึกจริงลง LTAX</label>
+          <p class="muted">โหมดบันทึกจริงทดสอบกับ LTAX จำลองแล้ว แต่ยังไม่เคยทดสอบกับระบบจริง ควรทดลองกับ 1 รายการที่ตรวจได้ก่อน แล้วเปิดดูใน LTAX ว่าถูกต้อง</p>
+        </div>
+      </div>
+      <div class="row"><button id="setSave" class="primary">บันทึกการตั้งค่า</button><span id="setMsg" class="muted"></span></div>
+      <p class="muted" id="dataDir"></p>
+    </section>
+  </main>
+
+  <dialog id="editor" class="editor"><form method="dialog" id="editorForm"></form></dialog>
+  <dialog id="opsBox" class="confirm wide"><form method="dialog" id="opsForm"></form></dialog>
+  <dialog id="shapeBox" class="confirm wide"><form method="dialog" id="shapeForm"></form></dialog>
+  <dialog id="confirmBox" class="confirm"><form method="dialog"><div id="confirmText"></div><div class="row end"><button value="no">ยกเลิก</button><button value="yes" class="primary">ยืนยัน</button></div></form></dialog>
+  <div id="toast" class="toast" hidden></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
