@@ -1,7 +1,7 @@
 // Builds the static L-LAN Web site into dist-web/ (no packages).
 // Supabase settings come from LLAN_SUPABASE_URL / LLAN_SUPABASE_KEY (the publishable/anon key, never the secret key),
 // or from web/config.js when the variables are not set.
-import { mkdirSync, copyFileSync, writeFileSync, existsSync, rmSync, readFileSync } from 'node:fs';
+import { mkdirSync, copyFileSync, writeFileSync, existsSync, rmSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -10,10 +10,20 @@ const OUT = path.resolve(ROOT, process.argv[2] || 'dist-web');
 const copy = (from, to) => { mkdirSync(path.dirname(path.join(OUT, to)), { recursive: true }); copyFileSync(path.join(ROOT, from), path.join(OUT, to)); };
 
 rmSync(OUT, { recursive: true, force: true });
-copy('web/index.html', 'index.html');
+// index.html = the full L-LAN working on the data in Supabase (sign in as a member);
+// map.html = the light map-only page.
+const walk = dir => readdirSync(path.join(ROOT, dir), { withFileTypes: true }).flatMap(d => (d.isDirectory() ? walk(`${dir}/${d.name}`) : [`${dir}/${d.name}`]));
+for (const f of walk('public')) copy(f, f.slice('public/'.length));
+copy('web/index.html', 'map.html');
 copy('web/web.js', 'web.js');
-for (const f of ['map.js', 'draw.js', 'styles.css', 'icon.svg']) copy(`public/${f}`, f);
-for (const f of ['proj.mjs', 'geom.mjs', 'calc.mjs']) copy(`public/shared/${f}`, `shared/${f}`);
+// The shared data API and the Supabase store run in the browser on the web (lib/ → /lib, shared → /shared).
+const BROWSER_LIB = ['core-api', 'cloud', 'cloud-store', 'parcel-status', 'layers', 'import-ltax', 'xlsx', 'export-xlsx', 'registry-ops', 'shapefile', 'cp874'];
+mkdirSync(path.join(OUT, 'lib'), { recursive: true });
+for (const name of BROWSER_LIB) {
+  const text = readFileSync(path.join(ROOT, 'lib', `${name}.mjs`), 'utf8');
+  if (/from 'node:/.test(text)) throw new Error(`lib/${name}.mjs ใช้โมดูลของ Node ซึ่งใช้บนเว็บไม่ได้`);
+  writeFileSync(path.join(OUT, 'lib', `${name}.mjs`), text.replaceAll("'../public/shared/", "'../shared/"));
+}
 
 // The web site is public: only the publishable/anon key may go into it.
 const isSecret = k => /secret|service_role/i.test(k + JSON.stringify(k.startsWith('eyJ') ? JSON.parse(Buffer.from(k.split('.')[1], 'base64url').toString()) : {}));

@@ -1,4 +1,5 @@
-// L-LAN local server: static UI, JSON API over the local data folder, imports/exports and LTAX jobs.
+// L-LAN local server (office machine): static UI, JSON API over the local data folder, imports/exports,
+// LTAX jobs, and the two-way sync with Supabase that the web page works on.
 // Listens on 127.0.0.1 only. Run: node server.mjs   (data folder: LLAN_DATA_DIR or ./data)
 import http from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
@@ -7,17 +8,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Store } from './lib/store.mjs';
 import { LtaxEngine, DEFAULT_LTAX } from './lib/ltax-engine.mjs';
-import { readLtaxWorkbook, mergeImport } from './lib/import-ltax.mjs';
-import { importShapefile, joinReport, overlayReport, exportLayer } from './lib/layers.mjs';
-import { readXlsx, writeXlsx, zipStore } from './lib/xlsx.mjs';
-import { buildWorkbook } from './lib/export-xlsx.mjs';
-import { validateAll } from './public/shared/validate.mjs';
-import { pendingState } from './public/shared/diff.mjs';
+import { writeXlsx } from './lib/xlsx.mjs';
 import { ENTITIES } from './public/shared/schema.mjs';
 import { repairObject } from './public/shared/thai-text.mjs';
-import { areaM2, bboxOf } from './public/shared/proj.mjs';
-import { ownerRelated, deleteOwner, deleteRecords, fillPrices } from './lib/registry-ops.mjs';
 import { Cloud } from './lib/cloud.mjs';
+import { CloudSync } from './lib/cloud-sync.mjs';
+import { coreRoutes, router, computeStatuses } from './lib/core-api.mjs';
+import { StatusPublisher } from './lib/status-publisher.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DATA = process.env.LLAN_DATA_DIR || path.join(ROOT, 'data');
@@ -36,7 +33,6 @@ const engine = new LtaxEngine(store, DATA);
     console.log(`ซ่อมข้อความภาษาไทยในข้อมูลแผนที่ ${fixed} ค่า`);
   }
 }
-const RECORDS = ['owners', 'lands', 'buildings', 'signboards'];
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml', '.jpg': 'image/jpeg', '.ico': 'image/x-icon' };
@@ -46,269 +42,122 @@ const send = (res, code, body, type = 'application/json; charset=utf-8', extra =
   res.end(typeof body === 'string' || body instanceof Uint8Array ? body : JSON.stringify(body));
 };
 const fail = (res, code, message) => send(res, code, { error: message });
+const httpError = (code, message) => Object.assign(new Error(message), { code });
 
 async function bodyJson(req, limit = 300 * 1024 * 1024) {
   const chunks = []; let size = 0;
-  for await (const c of req) { size += c.length; if (size > limit) throw Object.assign(new Error('ไฟล์ใหญ่เกินไป'), { code: 413 }); chunks.push(c); }
+  for await (const c of req) { size += c.length; if (size > limit) throw httpError(413, 'ไฟล์ใหญ่เกินไป'); chunks.push(c); }
   return chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
 }
-const b64 = s => (s ? new Uint8Array(Buffer.from(s, 'base64')) : undefined);
 const fileName = s => encodeURIComponent(s).replace(/['()]/g, escape);
 const download = (res, name, bytes, type) => send(res, 200, bytes, type, { 'Content-Disposition': `attachment; filename*=UTF-8''${fileName(name)}` });
 const stamp = () => new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
 
-// Records with their pending state for the UI and exports.
-function annotate() {
-  const out = {};
-  for (const c of RECORDS) out[c] = store.list(c).map(r => {
-    const p = pendingState(c, r);
-    return { ...r, pending: p.action, pendingCount: p.changes.length };
-  });
-  return out;
-}
+// Sign-in to L-LAN goes through the DLA SSO (user name, password, OTP) in L-LAN's Chrome window.
+// "offline" works on local data only; nothing can be sent to LTAX until signed in.
+let session = { mode: 'none' };
+const who = () => session.user?.name || 'สำนักงาน';
 
-function changeSummary() {
-  const rows = [];
-  for (const c of RECORDS) for (const r of store.list(c)) {
-    const p = pendingState(c, r);
-    if (!p.action) continue;
-    rows.push({ entity: c, entityTh: ENTITIES[c].th, id: r.id, title: ENTITIES[c].title(r), action: p.action, changes: p.changes, updatedAt: r.updatedAt });
-  }
-  return rows.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+// ---------- Supabase: the shared copy the web page works on ----------
+const cloudCfg = () => store.settings.cloud || {};
+const sync = new CloudSync(store, DATA, { cloud: () => (cloudCfg().enabled && cloudCfg().key && cloudCfg().url && isWriteKey(cloudCfg().key) ? new Cloud(cloudCfg()) : null), who });
+await sync.load();
+sync.attach();
+// Parcel statuses for the survey web page: recomputed after any change, sent up a few seconds later.
+const STATUS_INPUTS = new Set(['owners', 'lands', 'buildings', 'features', 'layers', 'checks', 'pushes']);
+let statusCache = null, statusAt = null;
+const currentStatuses = () => {
+  if (!statusCache) { statusCache = computeStatuses(store); statusAt = new Date().toISOString(); }
+  return statusCache;
+};
+const publisher = new StatusPublisher(DATA, { cloud: () => (sync.enabled ? new Cloud(cloudCfg()) : null), compute: currentStatuses });
+await publisher.load();
+const statusChanged = () => { statusCache = null; publisher.later(); };
+store.onChange(ev => { if (STATUS_INPUTS.has(ev.c)) statusChanged(); });
+// What the web page may know about this office (no keys, no LTAX settings).
+async function publishSettings() {
+  if (!sync.enabled) return;
+  const { org, amphur, districts, areaTolerance } = store.settings;
+  await new Cloud(cloudCfg()).setConfig('settings', JSON.stringify({ org, amphur, districts, areaTolerance })).catch(err => console.error('ส่งการตั้งค่าขึ้น Supabase ไม่ได้:', err.message));
 }
-
-const routes = [];
-const route = (method, pattern, fn) => routes.push({ method, re: new RegExp(`^${pattern.replace(/:(\w+)/g, '(?<$1>[^/]+)')}$`), fn });
 
 const publicSettings = () => {
   const { cloud = {}, ...rest } = store.settings;
-  return { ...rest, ltax: { ...DEFAULT_LTAX, ...(rest.ltax || {}) }, cloud: { url: cloud.url || '', enabled: !!cloud.enabled, hasKey: !!cloud.key, dirty: !!cloud.dirty, lastSync: cloud.lastSync || null } };
-};
-// Shapes go to Supabase as they change when enabled. A failed upload marks the cloud copy as behind.
-const cloud = () => (store.settings.cloud?.enabled ? new Cloud(store.settings.cloud) : null);
-async function toCloud(fn) {
-  const c = cloud();
-  if (!c) return null;
-  try { await fn(c); return null; } catch (err) {
-    await store.saveSettings({ cloud: { ...store.settings.cloud, dirty: true } });
-    return `บันทึกในเครื่องแล้ว แต่ส่งขึ้น Supabase ไม่สำเร็จ: ${err.message}`;
-  }
-}
-const who = () => session.user?.name || session.mode;
-
-route('GET', '/api/state', () => ({
-  counts: Object.fromEntries([...RECORDS, 'features', 'layers'].map(c => [c, store.list(c).length])),
-  pending: changeSummary().length + store.list('deletions').length, settings: publicSettings(), dataDir: DATA,
-}));
-route('GET', '/api/records', () => annotate());
-route('GET', '/api/layers', () => store.list('layers'));
-route('GET', '/api/features', () => store.list('features').map(({ attrs, ...f }) => f));
-route('GET', '/api/features/:id', ({ id }) => store.get('features', id) || null);
-
-for (const c of RECORDS) {
-  route('GET', `/api/${c}/:id`, ({ id }) => store.get(c, id));
-  route('POST', `/api/${c}`, async (_, body) => store.upsert(c, clean(body)));
-  route('PUT', `/api/${c}/:id`, async ({ id }, body) => {
-    const old = store.get(c, id);
-    if (!old) throw Object.assign(new Error('ไม่พบรายการ'), { code: 404 });
-    return store.upsert(c, { ...old, ...clean(body), id });
-  });
-  route('DELETE', `/api/${c}/:id`, async ({ id }) => ({ ok: true, removed: await deleteRecords(store, c, [id]) }));
-}
-// The UI may not overwrite bookkeeping fields.
-function clean(body) {
-  const { synced, ltaxId, pending, pendingCount, updatedAt, source, ...rest } = body || {};
-  return rest;
-}
-
-// Shapes drawn or reshaped in the map. Geometry is WGS84 GeoJSON (Polygon / MultiPolygon).
-function checkGeometry(g) {
-  const polys = g?.type === 'Polygon' ? [g.coordinates] : g?.type === 'MultiPolygon' ? g.coordinates : null;
-  const ok = polys && polys.every(p => Array.isArray(p) && p.every(r => Array.isArray(r) && r.length >= 4
-    && r.every(pt => Number.isFinite(pt[0]) && Number.isFinite(pt[1]) && Math.abs(pt[0]) <= 180 && Math.abs(pt[1]) <= 90)));
-  if (!ok) throw Object.assign(new Error('รูปไม่ถูกต้อง (ต้องเป็นรูปหลายเหลี่ยมอย่างน้อย 3 จุด)'), { code: 400 });
-  return g;
-}
-const shapeFields = g => ({ geometry: g, bbox: bboxOf(g), areaM2: Math.round(areaM2(g) * 100) / 100 });
-const LAYER_DEFAULTS = {
-  parcel: { name: 'แปลงที่วาดใหม่', codeField: 'parcel_cod' },
-  building: { name: 'อาคารที่วาดใหม่', codeField: 'building_c' },
+  return { ...rest, ltax: { ...DEFAULT_LTAX, ...(rest.ltax || {}) }, cloud: { url: cloud.url || '', enabled: !!cloud.enabled, hasKey: !!cloud.key && isWriteKey(cloud.key), sync: sync.status(), status: publisher.status() } };
 };
 
-route('POST', '/api/features', async (_, body) => {
-  const kind = body.kind === 'building' ? 'building' : 'parcel';
-  const geometry = checkGeometry(body.geometry);
-  let layer = body.layerId ? store.get('layers', body.layerId) : store.list('layers').find(l => l.kind === kind);
-  if (!layer) {
-    const d = LAYER_DEFAULTS[kind];
-    layer = await store.upsert('layers', { name: d.name, kind, crs: store.list('layers')[0]?.crs || 'EPSG:32648', codeField: d.codeField, geometryType: 'Polygon',
-      encoding: 'utf-8', fields: [{ name: d.codeField, type: 'C', length: 20, decimals: 0 }], prj: '', count: 0, importedAt: new Date().toISOString() }, { reason: 'สร้างชั้นแผนที่สำหรับรูปที่วาด' });
-  }
-  const code = String(body.code || '').trim().toUpperCase();
-  const feats = store.list('features').filter(f => f.layerId === layer.id);
-  const fid = feats.reduce((m, f) => Math.max(m, f.fid ?? -1), -1) + 1;
-  const attrs = Object.fromEntries(layer.fields.map(f => [f.name, null]));
-  if (layer.codeField) attrs[layer.codeField] = code;
-  const feature = await store.upsert('features', { layerId: layer.id, kind, fid, code, ...shapeFields(geometry), attrs: { ...attrs, ...(body.attrs || {}) }, drawn: true },
-    { reason: `วาดรูป${kind === 'parcel' ? 'แปลง' : 'อาคาร'}ใหม่ ${code}` });
-  const layerNow = await store.upsert('layers', { ...layer, count: feats.length + 1 }, { reason: 'เพิ่มรูปในชั้นแผนที่' });
-  const cloudWarning = await toCloud(async c => {
-    await c.upsertLayer(layerNow); await c.upsertFeatures([feature], who());
-    await c.log({ feature_id: feature.id, code: feature.code, action: 'create', area_after: feature.areaM2, by_user: who() });
-  });
-  return { ...feature, cloudWarning };
-});
-
-route('PUT', '/api/features/:id', async ({ id }, body) => {
-  const old = store.get('features', id);
-  if (!old) throw Object.assign(new Error('ไม่พบรูปแปลง'), { code: 404 });
-  const next = { ...old, attrs: { ...old.attrs, ...(body.attrs || {}) } };
-  if (body.code !== undefined) next.code = String(body.code).trim().toUpperCase();
-  const layer = store.get('layers', old.layerId);
-  if (layer?.codeField && body.code !== undefined) next.attrs[layer.codeField] = next.code;
-  let reason = 'แก้ข้อมูลรูปแปลง';
-  if (body.geometry) {
-    Object.assign(next, shapeFields(checkGeometry(body.geometry)), { reshaped: true });
-    reason = `แก้รูป ${next.code || ''} พื้นที่ ${old.areaM2} → ${next.areaM2} ตร.ม.`;
-  }
-  const saved = await store.upsert('features', next, { reason });
-  const cloudWarning = await toCloud(async c => {
-    await c.upsertFeatures([saved], who());
-    await c.log({ feature_id: saved.id, code: saved.code, action: body.geometry ? 'reshape' : 'update', area_before: old.areaM2, area_after: saved.areaM2, by_user: who() });
-  });
-  return { ...saved, cloudWarning };
-});
-
-route('DELETE', '/api/features/:id', async ({ id }) => {
-  const old = store.get('features', id);
-  if (!old) throw Object.assign(new Error('ไม่พบรูปแปลง'), { code: 404 });
-  await store.remove('features', id);
-  const layer = store.get('layers', old.layerId);
-  if (layer) await store.upsert('layers', { ...layer, count: Math.max(0, (layer.count || 1) - 1) }, { reason: `ลบรูป ${old.code || ''}` });
-  const cloudWarning = await toCloud(async c => {
-    await c.deleteFeature(id);
-    await c.log({ feature_id: id, code: old.code, action: 'delete', area_before: old.areaM2, by_user: who() });
-  });
-  return { ok: true, cloudWarning };
-});
-
-route('DELETE', '/api/layers/:id', async ({ id }) => {
-  await store.replaceAll('features', store.list('features').filter(f => f.layerId !== id), { action: 'delete-layer', recordId: id });
-  await store.remove('layers', id);
-  const cloudWarning = await toCloud(c => c.deleteLayer(id));
-  return { ok: true, cloudWarning };
-});
-
-// Registry operations
-route('GET', '/api/owners/:id/related', ({ id }) => ownerRelated(store, id));
-route('POST', '/api/owners/:id/delete', async ({ id }, body) => {
-  if (!store.get('owners', id)) throw Object.assign(new Error('ไม่พบเจ้าของ'), { code: 404 });
-  return deleteOwner(store, id, { withAssets: !!body.withAssets, withShapes: !!body.withShapes });
-});
-route('POST', '/api/bulk/delete', async (_, body) => {
-  if (!RECORDS.includes(body.entity) || !Array.isArray(body.ids)) throw Object.assign(new Error('คำขอไม่ถูกต้อง'), { code: 400 });
-  if (body.entity === 'owners') {
-    const total = {};
-    for (const id of body.ids) for (const [k, v] of Object.entries(await deleteOwner(store, id, { withAssets: !!body.withAssets, withShapes: !!body.withShapes }))) total[k] = (total[k] || 0) + v;
-    return total;
-  }
-  return deleteRecords(store, body.entity, body.ids, { withShapes: !!body.withShapes });
-});
-route('POST', '/api/prices/fill', (_, body) => {
-  if (!['lands', 'buildings'].includes(body.entity)) throw Object.assign(new Error('เติมราคาได้เฉพาะที่ดินและสิ่งปลูกสร้าง'), { code: 400 });
-  return fillPrices(store, body.entity, body.ids, { apply: !!body.apply });
-});
-route('GET', '/api/pushes', () => store.list('pushes'));
-route('GET', '/api/deletions', () => store.list('deletions'));
-route('DELETE', '/api/deletions/:id', async ({ id }) => ({ ok: await store.remove('deletions', decodeURIComponent(id)) }));
-
-route('GET', '/api/validate', () => validateAll({ ...store.data, parcels: store.list('features').filter(f => f.kind === 'parcel').map(f => ({ ...f, parcelCode: f.code })) }, { areaTolerance: (store.settings.areaTolerance ?? 10) / 100 }));
-route('GET', '/api/changes', () => changeSummary());
-route('GET', '/api/log', (_, __, url) => store.readLog({ limit: Number(url.searchParams.get('limit') || 300), recordId: url.searchParams.get('recordId') || undefined }));
-route('GET', '/api/reports/join', () => joinReport(store.data));
-route('GET', '/api/reports/overlay', () => overlayReport(store.data));
+// The office needs a key that can write: sb_secret_… or a legacy service_role JWT (not the publishable/anon key).
+function isWriteKey(k) {
+  if (k.startsWith('sb_secret_')) return true;
+  if (k.startsWith('eyJ')) { try { return JSON.parse(Buffer.from(k.split('.')[1], 'base64url').toString()).role === 'service_role'; } catch { return false; } }
+  return !k.startsWith('sb_publishable_');
+}
+const routes = coreRoutes(store, { settings: publicSettings, state: () => ({ dataDir: DATA }), who,
+  statuses: () => ({ rows: currentStatuses(), checkedAt: statusAt, published: publisher.status() }) });
+const route = (method, pattern, fn) => routes.push({ method, pattern, fn });
 
 route('PUT', '/api/settings', async (_, body) => {
   const patch = { ...body };
   if (body.ltax) patch.ltax = { ...(store.settings.ltax || {}), ...body.ltax };
   if (body.cloud) {
     const old = store.settings.cloud || {};
-    patch.cloud = { ...old, url: String(body.cloud.url ?? old.url ?? '').trim(), enabled: !!body.cloud.enabled, key: body.cloud.key ? String(body.cloud.key).trim() : old.key || '' };
+    const newKey = body.cloud.key ? String(body.cloud.key).trim() : '';
+    if (newKey && !isWriteKey(newKey)) throw httpError(400, 'key นี้เป็น publishable key (ใช้ได้แค่อ่าน) ต้องใช้ secret key: Supabase → Project Settings → API Keys → Secret keys (ขึ้นต้นด้วย sb_secret_)');
+    // A read-only key saved earlier is dropped, so the settings page asks for the secret key again.
+    const keep = old.key && isWriteKey(old.key) ? old.key : '';
+    patch.cloud = { url: String(body.cloud.url ?? old.url ?? '').trim(), enabled: !!body.cloud.enabled, key: newKey || keep };
   }
   await store.saveSettings(patch);
+  statusChanged();
+  publishSettings();
   return publicSettings();
 });
 
-// Supabase: shapes only. Pull replaces the local shapes with the cloud copy.
+const NEED_SECRET = 'ยังไม่มี secret key: วาง key จาก Supabase → Project Settings → API Keys → Secret keys (ขึ้นต้นด้วย sb_secret_) แล้วกดบันทึก';
+const needSecret = () => { if (!cloudCfg().key || !isWriteKey(cloudCfg().key)) throw httpError(400, NEED_SECRET); };
 route('GET', '/api/cloud/status', async () => {
-  const c = new Cloud(store.settings.cloud || {});
-  if (!c.configured) return { ok: false, message: 'ยังไม่ได้ใส่ URL หรือ secret key' };
-  try { return { ...(await c.status()), local: store.list('features').length }; } catch (err) { return { ok: false, message: err.message }; }
+  const c = new Cloud(cloudCfg());
+  if (!c.configured || !isWriteKey(c.key)) return { ok: false, message: c.url ? NEED_SECRET : 'ยังไม่ได้ใส่ Project URL', sync: sync.status() };
+  try { return { ...(await c.status()), local: store.list('features').length, sync: sync.status() }; }
+  catch (err) { return { ok: false, message: err.message, sync: sync.status() }; }
 });
+// Field photos live in Supabase Storage; the office reads and adds them with its secret key.
+const photoCloud = () => { needSecret(); return new Cloud(cloudCfg()); };
+const okPhotoPath = p => typeof p === 'string' && /^[a-z]+\/[^/]+\/[\w.-]+\.(jpe?g|png|webp)$/i.test(p) && !p.includes('..');
+route('GET', '/api/photos/file', async (_, __, url) => {
+  const p = url.searchParams.get('path');
+  if (!okPhotoPath(p)) throw httpError(400, 'ชื่อไฟล์รูปไม่ถูกต้อง');
+  const r = await photoCloud().photo(p);
+  return { raw: r.bytes, type: r.type };
+});
+route('POST', '/api/photos/file', async (_, body) => {
+  if (!okPhotoPath(body?.path) || !body.data) throw httpError(400, 'ข้อมูลรูปไม่ถูกต้อง');
+  await photoCloud().uploadPhoto(body.path, Buffer.from(body.data, 'base64'), body.type || 'image/jpeg');
+  return { ok: true, path: body.path };
+});
+route('DELETE', '/api/photos/file', async (_, __, url) => {
+  const p = url.searchParams.get('path');
+  if (!okPhotoPath(p)) throw httpError(400, 'ชื่อไฟล์รูปไม่ถูกต้อง');
+  await photoCloud().removePhotos([p]);
+  return { ok: true };
+});
+// Everything on this machine up to Supabase (first time). Web edits are pulled in first.
 route('POST', '/api/cloud/push', async () => {
-  const c = new Cloud(store.settings.cloud || {});
-  const r = await c.pushAll(store.list('layers'), store.list('features'), who());
-  await store.saveSettings({ cloud: { ...store.settings.cloud, dirty: false, lastSync: new Date().toISOString() } });
-  return r;
+  needSecret();
+  const r = await sync.uploadAll();
+  await publishSettings();
+  return { ...r, statuses: await publisher.publish({ all: true }).catch(err => ({ error: err.message })) };
 });
-route('POST', '/api/cloud/pull', async () => {
-  const c = new Cloud(store.settings.cloud || {});
-  const { layers, features } = await c.pullAll();
-  const keep = new Map(store.list('features').map(f => [f.id, f]));
-  // Cloud rows carry no personal attributes; keep any the local copy still has for the same shape.
-  const merged = features.map(f => ({ ...f, attrs: { ...(keep.get(f.id)?.attrs || {}), ...f.attrs }, bbox: bboxOf(f.geometry) }));
-  await store.replaceAll('layers', layers, { action: 'cloud-pull', after: { layers: layers.length } });
-  await store.replaceAll('features', merged, { action: 'cloud-pull', after: { features: merged.length } });
-  await store.saveSettings({ cloud: { ...store.settings.cloud, dirty: false, lastSync: new Date().toISOString() } });
-  return { layers: layers.length, features: merged.length };
-});
-route('GET', '/api/cloud/schema', async () => ({ sql: await readFile(path.join(ROOT, 'supabase', 'schema.sql'), 'utf8') }));
+route('POST', '/api/parcel-status/publish', () => publisher.publish({ all: true }));
+// Send what is waiting and take in what was changed on the web.
+route('POST', '/api/cloud/sync', () => { needSecret(); return sync.sync(); });
+route('GET', '/api/cloud/schema', async () => ({
+  sql: (await Promise.all(['schema.sql', 'web-access.sql', 'records.sql'].map(f => readFile(path.join(ROOT, 'supabase', f), 'utf8')))).join('\n\n'),
+}));
 
-// Imports. Files arrive base64-encoded in JSON from the browser file picker.
-route('POST', '/api/import/shapefile', async (_, body) => {
-  const files = { shp: b64(body.shp), dbf: b64(body.dbf), shx: b64(body.shx), prj: body.prj ? Buffer.from(body.prj, 'base64').toString('utf8') : undefined, cpg: body.cpg ? Buffer.from(body.cpg, 'base64').toString('utf8') : undefined };
-  if (!files.shp || !files.dbf) throw Object.assign(new Error('ต้องมีไฟล์ .shp และ .dbf'), { code: 400 });
-  const existing = store.list('layers').find(l => l.name === body.name);
-  const { layer, features } = importShapefile(body.name, files, { crs: body.crs || undefined, kind: body.kind || undefined, codeField: body.codeField, layerId: existing?.id });
-  await store.replaceAll('features', [...store.list('features').filter(f => f.layerId !== layer.id), ...features],
-    { action: 'import-layer', recordId: layer.id, after: { name: layer.name, kind: layer.kind, count: layer.count, crs: layer.crs } });
-  await store.upsert('layers', layer, { reason: 'นำเข้าชั้นแผนที่' });
-  const cloudWarning = await toCloud(async c => { await c.deleteLayerFeatures(layer.id).catch(() => {}); await c.upsertLayer(layer); await c.upsertFeatures(features, who()); });
-  return { layer, join: joinReport(store.data)[layer.kind]?.summary || null, cloudWarning };
-});
-
-route('POST', '/api/import/ltax-xlsx', async (_, body) => {
-  const sheets = await readXlsx(b64(body.file));
-  const imported = readLtaxWorkbook(sheets);
-  if (!imported.owners.length && !imported.lands.length && !imported.buildings.length) throw Object.assign(new Error('ไม่พบชีต owner / land / building ในไฟล์นี้'), { code: 400 });
-  if (body.preview) return { report: imported.report };
-  const { collections, result } = mergeImport(store.data, imported);
-  for (const [c, list] of Object.entries(collections))
-    await store.replaceAll(c, list, { action: 'import-ltax-xlsx', after: { file: body.name, added: result.added[c], updated: result.updated[c], keptLocal: result.keptLocal[c] } });
-  return { report: imported.report, result };
-});
-
-// Exports
-route('GET', '/api/export/xlsx', () => {
-  const db = { ...store.data, ...annotate() };
-  const bytes = writeXlsx(buildWorkbook(db, {
-    issues: validateAll({ ...store.data, parcels: store.list('features').filter(f => f.kind === 'parcel').map(f => ({ ...f, parcelCode: f.code })) }, { areaTolerance: (store.settings.areaTolerance ?? 10) / 100 }),
-    changes: changeSummary(), join: joinReport(store.data), overlay: overlayReport(store.data), checks: store.list('checks'),
-  }));
-  return { download: `L-LAN_${stamp()}.xlsx`, bytes, type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' };
-});
-route('GET', '/api/export/shp/:id', ({ id }, _, url) => {
-  const layer = store.get('layers', id);
-  if (!layer) throw Object.assign(new Error('ไม่พบชั้นแผนที่'), { code: 404 });
-  const crs = url.searchParams.get('crs') || layer.crs;
-  const files = exportLayer(layer, { ...store.data, ...annotate() }, { crs, encoding: url.searchParams.get('encoding') || 'utf-8' });
-  const base = `${layer.name}_LLAN`;
-  const entries = [['shp', files.shp], ['shx', files.shx], ['dbf', files.dbf], ['prj', files.prj], ['cpg', files.cpg]].filter(([, d]) => d).map(([ext, data]) => ({ name: `${base}.${ext}`, data }));
-  return { download: `${base}_${stamp()}.zip`, bytes: zipStore(entries), type: 'application/zip' };
-});
 route('GET', '/api/jobs/:id/report', ({ id }) => {
   const job = store.get('jobs', id);
-  if (!job) throw Object.assign(new Error('ไม่พบงาน'), { code: 404 });
+  if (!job) throw httpError(404, 'ไม่พบงาน');
   const STATUS = { done: 'สำเร็จ', error: 'ผิดพลาด', skipped: 'ข้าม', cancelled: 'ยกเลิก', waiting: 'รอ', running: 'กำลังทำ' };
   const rows = job.items.map((it, i) => ({ no: i + 1, entity: ENTITIES[it.entity].th, label: it.label, status: STATUS[it.status] || it.status, message: it.message,
     changes: (it.changes || []).map(c => `${c.th}: ${c.ltax || '-'} → ${c.local || '-'}`).join('\n'), manual: (it.manual || []).join('\n'), startedAt: it.startedAt || '', finishedAt: it.finishedAt || '' }));
@@ -319,9 +168,6 @@ route('GET', '/api/jobs/:id/report', ({ id }) => {
   return { download: `L-LAN_งาน_${job.type}_${job.mode}_${stamp()}.xlsx`, bytes, type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' };
 });
 
-// Sign-in to L-LAN goes through the DLA SSO (user name, password, OTP) in L-LAN's Chrome window.
-// "offline" works on local data only; nothing can be sent to LTAX until signed in.
-let session = { mode: 'none' };
 route('GET', '/api/session', () => session);
 route('POST', '/api/session/ltax', async () => {
   let s = await engine.status();
@@ -332,7 +178,6 @@ route('POST', '/api/session/ltax', async () => {
 });
 route('POST', '/api/session/offline', () => (session = { mode: 'offline', since: new Date().toISOString() }));
 route('POST', '/api/session/logout', () => (session = { mode: 'none' }));
-route('GET', '/api/checks', () => store.list('checks'));
 
 // LTAX
 route('GET', '/api/ltax/status', () => engine.status());
@@ -342,13 +187,20 @@ route('POST', '/api/ltax/enter', async () => ({ ok: await engine.enterLtax() }))
 route('GET', '/api/ltax/jobs', () => engine.listJobs());
 route('GET', '/api/ltax/jobs/:id', ({ id }) => store.get('jobs', id));
 route('POST', '/api/ltax/jobs', async (_, body) => {
+  // Work on the latest survey data: take in what was changed on the web first.
+  let cloudWarning = null;
+  if (sync.enabled) {
+    try { await sync.sync(); } catch (err) { cloudWarning = `ดึงข้อมูลล่าสุดจาก Supabase ไม่ได้ งานนี้ใช้ข้อมูลในเครื่อง (${err.message})`; }
+  }
   const job = await engine.startJob(body);
-  return { ...job, items: job.items };
+  return { ...job, items: job.items, cloudWarning };
 });
 route('POST', '/api/ltax/jobs/:id/stop', ({ id }) => { engine.stop(id); return { ok: true }; });
 
 const sseClients = new Set();
-engine.on('event', e => { for (const res of sseClients) res.write(`data: ${JSON.stringify(e)}\n\n`); });
+const broadcast = e => { for (const res of sseClients) res.write(`data: ${JSON.stringify(e)}\n\n`); };
+engine.on('event', broadcast);
+sync.on('change', s => broadcast({ type: 'cloud', ...s }));
 
 async function serveStatic(res, pathname) {
   const rel = pathname === '/' ? 'index.html' : decodeURIComponent(pathname.slice(1));
@@ -359,6 +211,7 @@ async function serveStatic(res, pathname) {
   send(res, 200, await readFile(file), MIME[path.extname(file)] || 'application/octet-stream');
 }
 
+const dispatch = router(routes);
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   try {
@@ -370,21 +223,23 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (!url.pathname.startsWith('/api/')) return await serveStatic(res, url.pathname);
-    for (const r of routes) {
-      if (r.method !== req.method) continue;
-      const m = url.pathname.match(r.re);
-      if (!m) continue;
-      const body = ['POST', 'PUT'].includes(req.method) ? await bodyJson(req) : null;
-      const out = await r.fn(m.groups || {}, body, url);
-      if (out && out.download) return download(res, out.download, out.bytes, out.type);
-      return send(res, 200, out ?? null);
-    }
-    fail(res, 404, 'ไม่พบคำสั่ง');
+    const hit = dispatch(req.method, url);
+    if (!hit.found) return fail(res, 404, 'ไม่พบคำสั่ง');
+    const body = ['POST', 'PUT'].includes(req.method) ? await bodyJson(req) : null;
+    const out = await hit.run(body);
+    if (out && out.download) return download(res, out.download, out.bytes, out.type);
+    if (out && out.raw) return send(res, 200, out.raw, out.type, { 'Cache-Control': 'private, max-age=86400' });
+    send(res, 200, out ?? null);
   } catch (err) {
     if (!res.headersSent) fail(res, err.code && Number.isInteger(err.code) ? err.code : 500, err.message);
-    if (!err.code) console.error(err);
+    if (!err.code || !Number.isInteger(err.code)) console.error(err);
   }
 });
 
-server.listen(PORT, HOST, () => console.log(`L-LAN พร้อมใช้งานที่ http://${HOST === '0.0.0.0' ? '127.0.0.1' : HOST}:${PORT}  (ข้อมูล: ${DATA})`));
-export { server, store, engine };
+server.listen(PORT, HOST, () => {
+  console.log(`L-LAN พร้อมใช้งานที่ http://${HOST === '0.0.0.0' ? '127.0.0.1' : HOST}:${PORT}  (ข้อมูล: ${DATA})`);
+  sync.start();
+  publisher.later(3000);
+  publishSettings();
+});
+export { server, store, engine, sync };

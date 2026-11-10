@@ -87,7 +87,8 @@ export class MapView {
         if (s.stroke) {
           // On imagery a dark halo under a bright line keeps boundaries readable.
           if (s.halo) { ctx.strokeStyle = s.halo; ctx.lineWidth = ((s.width || 1) + 2.5) * this.res; ctx.stroke(f._path); }
-          ctx.strokeStyle = s.stroke; ctx.lineWidth = (s.width || 1) * this.res; ctx.stroke(f._path);
+          ctx.strokeStyle = s.stroke; ctx.lineWidth = (s.width || 1) * this.res;
+          if (s.dash) { ctx.setLineDash(s.dash.map(d => d * this.res)); ctx.stroke(f._path); ctx.setLineDash([]); } else ctx.stroke(f._path);
         }
       }
     }

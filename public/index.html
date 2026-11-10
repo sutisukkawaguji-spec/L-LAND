@@ -12,15 +12,16 @@
     <div class="brand"><img src="icon.svg" alt=""><b>L-LAN</b><span class="sub">จัดการข้อมูลภาษีที่ดินและสิ่งปลูกสร้าง</span></div>
     <nav class="tabs" id="tabs">
       <button data-tab="map" class="on">แผนที่</button>
+      <button data-tab="status">สถานะแปลง <span class="badge" id="badgeFix"></span></button>
       <button data-tab="registry">ทะเบียน</button>
       <button data-tab="checks">ตรวจสอบ <span class="badge" id="badgeErrors"></span></button>
       <button data-tab="changes">สรุปการแก้ไข <span class="badge" id="badgePending"></span></button>
-      <button data-tab="ltax">ส่งเข้า LTAX</button>
+      <button data-tab="ltax" class="local-only">ส่งเข้า LTAX <span class="badge" id="badgeReady" title="แปลงที่สำรวจเสร็จ รอลง LTAX"></span></button>
       <button data-tab="data">นำเข้า / ส่งออก</button>
-      <button data-tab="settings">ตั้งค่า</button>
+      <button data-tab="settings" class="local-only">ตั้งค่า</button>
     </nav>
     <button class="job-chip" id="jobChip" hidden onclick="document.querySelector(&quot;#tabs button[data-tab=ltax]&quot;).click()"></button>
-    <div class="ltax-chip" id="ltaxChip" title="สถานะการเชื่อมต่อ LTAX ONLINE">LTAX: -</div>
+    <div class="ltax-chip local-only" id="ltaxChip" title="สถานะการเชื่อมต่อ LTAX ONLINE">LTAX: -</div>
     <div class="user-chip" id="userChip"></div>
   </header>
 
@@ -50,6 +51,8 @@
           <div class="row">
             <label>สีแปลงตาม
               <select id="mapColor">
+                <option value="status">สถานะแปลง (ระบบกลาง)</option>
+                <option value="survey">ความคืบหน้าการสำรวจ</option>
                 <option value="link">การเชื่อมต่อข้อมูล</option>
                 <option value="saved">สถานะบันทึกเข้า LTAX</option>
                 <option value="join">การจอยกับทะเบียน</option>
@@ -141,6 +144,23 @@
       <div class="pager" id="regPager"></div>
     </section>
 
+    <!-- สถานะแปลง: ระบบกลางตรวจทุกแปลง แล้วเก็บผลใน Supabase ให้ระบบสำรวจ -->
+    <section class="tab" id="tab-status">
+      <div class="toolbar">
+        <div class="seg" id="stView"><button data-v="fix" class="on">ต้องปรับแก้</button><button data-v="send">รอ LTAX</button><button data-v="ok">ข้อมูลตรง</button><button data-v="">ทั้งหมด</button></div>
+        <select id="stLink"><option value="">ทุกแบบการเชื่อมโยง</option></select>
+        <select id="stSurvey"><option value="">ทุกสถานะการสำรวจ</option><option value="none">ยังไม่สำรวจ</option><option value="draft">กำลังสำรวจ</option><option value="revisit">ต้องกลับไปสำรวจซ้ำ</option>
+          <option value="ready">สำรวจเสร็จ รอลง LTAX</option><option value="done">สำรวจเสร็จ ตรงกับ LTAX แล้ว</option><option value="changed">แก้ไขหลังกดสำรวจเสร็จ</option><option value="ready+done">สำรวจเสร็จทั้งหมด</option></select>
+        <input id="stSearch" type="search" placeholder="ค้นหารหัสแปลงหรือข้อความ">
+        <span class="grow"></span>
+        <span id="stWhen" class="muted"></span>
+        <button id="stPublish" class="local-only">ส่งสถานะขึ้น Supabase</button>
+      </div>
+      <div class="cards" id="stSummary"></div>
+      <div class="table-wrap"><table class="grid" id="stTable"></table></div>
+      <div class="pager" id="stPager"></div>
+    </section>
+
     <!-- ตรวจสอบ -->
     <section class="tab" id="tab-checks">
       <div class="toolbar">
@@ -158,9 +178,9 @@
     <!-- สรุปการแก้ไข -->
     <section class="tab" id="tab-changes">
       <div class="toolbar">
-        <div class="seg" id="chgView"><button data-v="pending" class="on">รายการที่ต่างจาก LTAX</button><button data-v="log">ประวัติการแก้ไขทั้งหมด</button></div>
+        <div class="seg" id="chgView"><button data-v="pending" class="on">รายการที่ต่างจาก LTAX</button><button data-v="ready">สำรวจเสร็จ รอลง LTAX</button><button data-v="log">ประวัติการแก้ไขทั้งหมด</button></div>
         <span class="grow"></span>
-        <button id="chgSendSel" class="primary">ส่งรายการที่เลือกเข้า LTAX…</button>
+        <button id="chgSendSel" class="primary local-only">ส่งรายการที่เลือกเข้า LTAX…</button>
       </div>
       <div class="cards" id="chgSummary"></div>
       <div id="chgList" class="list"></div>
@@ -182,7 +202,7 @@
           <div class="form-row"><label>โหมด</label>
             <select id="jobMode"><option value="dry">ทดลอง: กรอกและเทียบกับ LTAX แต่ไม่บันทึก</option><option value="real">บันทึกจริงลง LTAX</option></select></div>
           <div class="form-row"><label>รายการ</label>
-            <select id="jobScope"><option value="pending">ทุกรายการที่รอส่ง (ผ่านการตรวจ)</option><option value="selected">เฉพาะที่เลือกในหน้าสรุปการแก้ไข</option><option value="lands-all">ที่ดินทั้งหมด (สำหรับดึงข้อมูล)</option>
+            <select id="jobScope"><option value="survey-ready">แปลงที่สำรวจเสร็จแล้ว (รอลง LTAX)</option><option value="pending">ทุกรายการที่รอส่ง (ผ่านการตรวจ)</option><option value="selected">เฉพาะที่เลือกในหน้าสรุปการแก้ไข</option><option value="lands-all">ที่ดินทั้งหมด (สำหรับดึงข้อมูล)</option>
               <option value="parcels-unchecked">รูปแปลงในแผนที่ที่ยังไม่เคยตรวจกับ LTAX</option><option value="parcels-unjoined">รูปแปลงที่จอยกับทะเบียนไม่ได้</option>
               <option value="parcels-all">รูปแปลงในแผนที่ทั้งหมด</option><option value="buildings-shapes">รูปอาคารในแผนที่ทั้งหมด</option></select></div>
           <div class="form-row"><label>เริ่มที่ลำดับ</label><input id="jobFrom" type="number" min="1" value="1"></div>
@@ -207,14 +227,14 @@
     <!-- นำเข้า / ส่งออก -->
     <section class="tab" id="tab-data">
       <div class="ltax-grid">
-        <div class="panel">
+        <div class="panel local-only">
           <h3>นำเข้า Excel ที่ส่งออกจาก LTAX ONLINE</h3>
           <p class="muted">ไฟล์ที่มีชีต owner, land, land_detail, building, building_detail, sign นำเข้าซ้ำได้ รายการที่แก้ในเครื่องแล้วจะไม่ถูกทับ</p>
           <input type="file" id="xlsxFile" accept=".xlsx">
           <div class="row"><button id="xlsxPreview">ตรวจไฟล์ก่อน</button><button id="xlsxImport" class="primary">นำเข้า</button></div>
           <div id="xlsxResult" class="result"></div>
         </div>
-        <div class="panel">
+        <div class="panel local-only">
           <h3>นำเข้าแผนที่ (.shp)</h3>
           <p class="muted">เลือกไฟล์ .shp .dbf .shx .prj .cpg ของชั้นเดียวกันพร้อมกัน ระบบพิกัดอ่านจาก .prj (WGS84 / UTM 47-48 / Indian 1975)</p>
           <input type="file" id="shpFiles" multiple accept=".shp,.dbf,.shx,.prj,.cpg">
@@ -264,16 +284,17 @@
         </div>
       </div>
       <div class="panel">
-        <h3>Supabase: เก็บรูปแปลงและรูปอาคารออนไลน์</h3>
-        <p class="muted">Supabase เก็บเฉพาะรูป รหัสแปลง/อาคาร พื้นที่ และช่องที่ไม่ใช่ข้อมูลส่วนบุคคล ระบบจะตัดช่องชื่อเจ้าของ เลขบัตร ที่อยู่ และโทรศัพท์ออกก่อนส่งทุกครั้ง ข้อมูลทะเบียนให้ดูสดจาก LTAX</p>
+        <h3>Supabase: ข้อมูลกลางที่หน้าเว็บใช้งาน</h3>
+        <p class="muted">ทะเบียน (เจ้าของ ที่ดิน สิ่งปลูกสร้าง ป้าย) และรูปแปลง/อาคารอยู่ใน Supabase ผู้ใช้แก้ไขได้จาก https://sutisukkawaguji-spec.github.io/L-LAND/ (เฉพาะอีเมลใน llan_members)
+          เครื่องนี้ส่งการแก้ไขขึ้นทันที และดึงการแก้ไขจากเว็บทุก 1 นาที และก่อนเริ่มงาน LTAX ทุกครั้ง ไฟล์ .shp ส่งขึ้นครบทุกช่อง และสถานะแต่ละแปลงจากระบบกลางส่งขึ้นให้ระบบสำรวจด้วย</p>
         <div class="form-row"><label>Project URL</label><input id="cloudUrl" placeholder="https://xxxx.supabase.co"></div>
         <div class="form-row"><label>Secret key (service_role)</label><input id="cloudKey" type="password" autocomplete="off" placeholder="วางจาก Supabase → Project Settings → API Keys"></div>
-        <label class="check"><input type="checkbox" id="cloudOn"> ส่งรูปขึ้น Supabase ทุกครั้งที่วาด แก้ ลบ หรือนำเข้า</label>
+        <label class="check"><input type="checkbox" id="cloudOn"> ซิงก์ข้อมูลกับ Supabase อัตโนมัติ (ทะเบียน + รูป)</label>
         <div class="row">
           <button id="cloudSql">คัดลอก SQL สร้างตาราง</button>
           <button id="cloudTest">ทดสอบการเชื่อมต่อ</button>
-          <button id="cloudPush">อัปโหลดรูปทั้งหมดขึ้น Supabase</button>
-          <button id="cloudPull">ดึงรูปจาก Supabase มาแทนในเครื่อง</button>
+          <button id="cloudPush">อัปโหลดข้อมูลทั้งหมด (ครั้งแรก)</button>
+          <button id="cloudPull" class="primary">ซิงก์ตอนนี้</button>
         </div>
         <div id="cloudState" class="state"></div>
       </div>
@@ -283,6 +304,8 @@
   </main>
 
   <dialog id="editor" class="editor"><form method="dialog" id="editorForm"></form></dialog>
+  <dialog id="photoView" class="photo-view"><form method="dialog"><img id="photoBig" alt=""><div class="row"><span id="photoMeta" class="muted"></span><span class="grow"></span><button>ปิด</button></div></form></dialog>
+  <input type="file" id="photoInput" accept="image/*" capture="environment" multiple hidden>
   <dialog id="opsBox" class="confirm wide"><form method="dialog" id="opsForm"></form></dialog>
   <dialog id="shapeBox" class="confirm wide"><form method="dialog" id="shapeForm"></form></dialog>
   <dialog id="confirmBox" class="confirm"><form method="dialog"><div id="confirmText"></div><div class="row end"><button value="no">ยกเลิก</button><button value="yes" class="primary">ยืนยัน</button></div></form></dialog>

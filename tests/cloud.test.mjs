@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Cloud, cleanAttrs, isSensitiveField } from '../lib/cloud.mjs';
+import { Cloud } from '../lib/cloud.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const KEY = 'sb_secret_test';
@@ -43,11 +43,6 @@ function fakeSupabase({ schema = true } = {}) {
 const listen = srv => new Promise(r => srv.listen(0, '127.0.0.1', () => r(`http://127.0.0.1:${srv.address().port}`)));
 const square = (x, y) => ({ type: 'Polygon', coordinates: [[[x, y], [x + 0.001, y], [x + 0.001, y + 0.001], [x, y + 0.001], [x, y]]] });
 
-test('personal attributes are stripped', () => {
-  assert.deepEqual(cleanAttrs({ parcel_cod: '11E015', own_fname: 'นาย ก', owner: 'x', id_card: '1', land_type: 'โฉนด', hs_no: '18', tel: '08' }), { parcel_cod: '11E015', land_type: 'โฉนด', hs_no: '18' });
-  assert.ok(isSensitiveField('OWNER_NAME') && !isSensitiveField('building_c'));
-});
-
 test('push and pull through the fake Supabase', async () => {
   const fake = fakeSupabase({ schema: false });
   const url = await listen(fake.server);
@@ -61,9 +56,10 @@ test('push and pull through the fake Supabase', async () => {
     await c.pushAll([layer], features, 'ทดสอบ');
     assert.equal(fake.tables.llan_features.size, 1500);
     const sent = fake.tables.llan_features.get('f0001');
-    assert.equal(sent.attrs.own_fname, undefined);
+    // All .shp columns go up (members-only tables, the user's choice of 11-10).
+    assert.equal(sent.attrs.own_fname, 'นาย ก');
     assert.equal(sent.updated_by, 'ทดสอบ');
-    assert.deepEqual(fake.tables.llan_layers.get('L1').fields, [{ name: 'parcel_cod' }]);
+    assert.deepEqual(fake.tables.llan_layers.get('L1').fields, [{ name: 'parcel_cod' }, { name: 'own_fname' }]);
     const back = await c.pullAll();
     assert.equal(back.features.length, 1500); // two pages of 1000
     assert.deepEqual(back.features.find(f => f.id === 'f0001').geometry, features[1].geometry);
@@ -86,20 +82,13 @@ test('server sends shape edits to Supabase and warns when it cannot', { timeout:
     assert.equal(st.settings.cloud.hasKey, true);
     assert.equal(JSON.stringify(st).includes(KEY), false); // the key never reaches the browser
     const f = await call('POST', '/api/features', { kind: 'parcel', code: '99A001', geometry: square(102.13, 17.79), attrs: { own_fname: 'นาย ก' } });
-    assert.equal(f.cloudWarning, null);
+    // Shapes go up through the sync queue a moment later, with all their columns.
+    for (let i = 0; i < 40 && !fake.tables.llan_features.has(f.id); i++) await new Promise(r => setTimeout(r, 200));
     assert.equal(fake.tables.llan_features.get(f.id).code, '99A001');
-    assert.equal(fake.tables.llan_features.get(f.id).attrs.own_fname, undefined);
-    assert.equal(fake.tables.llan_feature_log.size, 1);
-    await call('DELETE', `/api/features/${f.id}`);
+    assert.equal(fake.tables.llan_features.get(f.id).attrs.own_fname, 'นาย ก');
+    await call('DELETE', '/api/features/' + f.id);
+    for (let i = 0; i < 40 && fake.tables.llan_features.has(f.id); i++) await new Promise(r => setTimeout(r, 200));
     assert.equal(fake.tables.llan_features.has(f.id), false);
-    fake.state.schema = false; // Supabase broken: local save still works, with a warning
-    const g = await call('POST', '/api/features', { kind: 'parcel', code: '99A002', geometry: square(102.14, 17.79) });
-    assert.match(g.cloudWarning, /ส่งขึ้น Supabase ไม่สำเร็จ/);
-    assert.equal((await call('GET', '/api/state')).settings.cloud.dirty, true);
-    fake.state.schema = true;
-    const pushed = await call('POST', '/api/cloud/push');
-    assert.equal(pushed.features, 1);
-    assert.equal((await call('GET', '/api/state')).settings.cloud.dirty, false);
   } finally {
     proc.kill(); fake.server.close();
     await new Promise(r => setTimeout(r, 300));

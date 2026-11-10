@@ -80,7 +80,7 @@ test('L-LAN Web: sign in, see shapes, draw and delete a building', { skip: !find
   const site = staticServer(dist);
   const web = await listen(site);
   const port = 9700 + Math.floor(Math.random() * 200);
-  const child = await launchChrome({ port, profileDir: path.join(dist, '..', `llan-web-chrome-${port}`), url: `${web}/`, headless: true });
+  const child = await launchChrome({ port, profileDir: path.join(dist, '..', `llan-web-chrome-${port}`), url: `${web}/map.html`, headless: true });
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   try {
     const p = await Page.attach((await listTargets(port)).find(t => t.url.startsWith(web)));

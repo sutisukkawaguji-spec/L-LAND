@@ -8,16 +8,37 @@ import { diffRecord } from './shared/diff.mjs';
 import { setupMapEditing } from './map-edit.js';
 import { createOps } from './ops.js';
 import { landTotal, useValue, buildingValue, deprTable, suggestLandPrice, suggestBuildingPrice } from './shared/valuation.mjs';
+// Parcel status labels (same as lib/parcel-status.mjs, which the office uses to decide them).
+const STATUS_STYLE = { ok: ['#2e9d6a', 'ข้อมูลตรง', 'ok'], fix: ['#d64545', 'ต้องปรับแก้ (สำรวจ)', 'err'], send: ['#9b51e0', 'รอดำเนินการใน LTAX', 'warn'] };
+const LINK_TH = { ok: 'รูปแปลงตรงกับทะเบียน', 'no-record': 'มีรูป ไม่มีทะเบียน', 'no-shape': 'มีทะเบียน ไม่มีรูป', 'dup-shape': 'รหัสซ้ำบนแผนที่', 'dup-record': 'รหัสซ้ำในทะเบียน', 'no-code': 'รูปไม่มีรหัส' };
+const LTAX_TH = { found: 'พบใน LTAX', 'not-found': 'ไม่พบใน LTAX', dup: 'รหัสซ้ำใน LTAX', new: 'ยังไม่มีใน LTAX', none: '-' };
+// Survey state of a parcel: [label, pill class, map colour]
+const SURVEY_STYLE = { draft: ['กำลังสำรวจ', 'info', '#2f80ed'], revisit: ['ต้องกลับไปสำรวจซ้ำ', 'err', '#d64545'], ready: ['สำรวจเสร็จ รอลง LTAX', 'ok', '#27ae60'],
+  done: ['สำรวจเสร็จ ตรงกับ LTAX แล้ว', 'ok', '#1e7a4f'], changed: ['แก้ไขหลังกดสำรวจเสร็จ', 'warn', '#f2994a'] };
 
 // ---------- helpers ----------
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// Web mode: the page comes from github.io and works on the shared copy in Supabase (members sign in).
+// The same data API runs in the browser. LTAX work stays on the office machine (127.0.0.1), which syncs.
+const WEB = !/^(127\.0\.0\.1|localhost)$/.test(location.hostname);
+const CONFIG = WEB ? (await import('./config.js')).default : null;
+const WEBAUTH = { session: null, dispatch: null, store: null, role: null };
 async function api(method, url, body) {
+  if (WEB) return webApi(method, url, body);
   const res = await fetch(url, { method, headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
   const data = res.headers.get('content-type')?.includes('json') ? await res.json() : null;
   if (!res.ok) throw new Error(data?.error || `ผิดพลาด ${res.status}`);
   return data;
+}
+async function webApi(method, url, body) {
+  if (!WEBAUTH.dispatch) throw new Error('กรุณาเข้าสู่ระบบ');
+  const hit = WEBAUTH.dispatch(method, new URL(url, location.href));
+  if (!hit.found) throw new Error('ส่วนนี้ใช้ได้ที่เครื่องสำนักงานเท่านั้น');
+  if (method !== 'GET' && WEBAUTH.role === 'viewer') throw new Error('บัญชีนี้ดูข้อมูลได้อย่างเดียว');
+  // Copies, like a server would send: the page never edits the store's own objects.
+  return structuredClone((await hit.run(body ? structuredClone(body) : null)) ?? null);
 }
 function toast(msg, err = false) {
   const t = $('#toast'); t.textContent = msg; t.className = `toast${err ? ' err' : ''}`; t.hidden = false;
@@ -44,6 +65,25 @@ const S = {
 };
 const ownerName = o => (o ? [o.prefixName, o.firstName, o.lastName].filter(Boolean).join(' ') : '');
 const ownerNames = ids => (ids || []).map(id => ownerName(S.by.owners?.get(id))).filter(Boolean).join(', ');
+// ID number shown in the field with the middle digits hidden: 1-1017x-xxxx-45-1
+const maskId = v => { const s = String(v || '').replace(/\D/g, ''); return s.length === 13 ? `${s[0]}-${s.slice(1, 5)}x-xxxx-${s.slice(10, 12)}-${s[12]}` : String(v || ''); };
+function ownerAddr(o) {
+  const cur = o.currNo || o.currVillage || o.currDistrict, p = cur ? 'curr' : 'addr';
+  const v = k => o[`${p}${k}`];
+  return [v('No') && `เลขที่ ${v('No')}`, v('Village') && `หมู่ ${v('Village')}`, v('Road') && `ถ.${v('Road')}`, v('Alley') && `ซ.${v('Alley')}`,
+    v('District') && `ต.${v('District')}`, v('Amphur') && `อ.${v('Amphur')}`].filter(Boolean).join(' ');
+}
+// Owner cards for the map panel: name, masked ID, phone (tap to call), address.
+const ownerCards = ids => (ids || []).map(id => S.by.owners?.get(id)).filter(Boolean).map(o => `<div class="owner-card">
+  <button class="link" data-open-owner="${esc(o.id)}">${esc(ownerName(o))}</button>
+  <div class="muted">${o.psnId ? `เลขประจำตัว ${esc(maskId(o.psnId))}` : ''}${o.tel ? ` · โทร <a href="tel:${esc(String(o.tel).replace(/[^\d+]/g, ''))}">${esc(o.tel)}</a>` : ''}</div>
+  ${ownerAddr(o) ? `<div class="muted">${esc(ownerAddr(o))}</div>` : ''}</div>`).join('') || '-';
+// Directions to a shape from where the phone is (Google Maps).
+function navLink(f) {
+  const b = f?.bbox; if (!b) return '';
+  const lat = ((b[1] + b[3]) / 2).toFixed(6), lon = ((b[0] + b[2]) / 2).toFixed(6);
+  return `<a class="btn" target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&destination=${lat},${lon}" title="เปิดเส้นทางใน Google Maps">➜ นำทาง</a>`;
+}
 const db = () => ({ ...S.rec, parcels: S.features.filter(f => f.kind === 'parcel').map(f => ({ ...f, parcelCode: f.code })) });
 
 async function loadRecords() {
@@ -65,6 +105,161 @@ async function loadIssues() {
   const errs = S.issues.filter(i => i.level === 'error').length;
   $('#badgeErrors').textContent = errs ? errs.toLocaleString() : '';
 }
+async function loadStatuses() {
+  [S.status, S.survey] = await Promise.all([api('GET', '/api/parcel-status'), api('GET', '/api/survey')]);
+  S.statusBy = new Map(S.status.rows.map(r => [r.id, r]));
+  $('#badgeFix').textContent = S.status.summary.fix ? S.status.summary.fix.toLocaleString() : '';
+  S.surveyBy = new Map(S.survey.map(s => [s.code, s]));
+  const ready = S.survey.filter(s => s.state === 'ready').length;
+  $('#badgeReady').textContent = ready ? ready.toLocaleString() : '';
+}
+// ---------- field photos (Supabase Storage; the record keeps the list) ----------
+const photoCache = new Map();
+function photoSrc(path) {
+  if (!WEB) return Promise.resolve(`/api/photos/file?path=${encodeURIComponent(path)}`);
+  if (!photoCache.has(path)) photoCache.set(path, WEBAUTH.cloud.photo(path).then(r => URL.createObjectURL(new Blob([r.bytes], { type: r.type }))).catch(err => { photoCache.delete(path); throw err; }));
+  return photoCache.get(path);
+}
+function photosHtml(entity, rec) {
+  if (!rec?.id) return '';
+  const list = rec.photos || [];
+  return `<div class="photos-box" data-photos="${esc(entity)}|${esc(rec.id)}"><b>รูปถ่าย (${list.length})</b>
+    <div class="photos">${list.map(p => `<figure><img data-photo="${esc(p.path)}" alt="" title="${esc(p.by || '')} ${whenTh(p.at)}">
+      <button type="button" class="edit-only" data-photo-del="${esc(p.path)}" title="ลบรูป">✕</button></figure>`).join('') || '<span class="muted">ยังไม่มีรูป</span>'}</div>
+    <button type="button" class="edit-only" data-photo-add>📷 ถ่ายรูป / เพิ่มรูป</button></div>`;
+}
+function hydratePhotos(root) {
+  for (const img of root.querySelectorAll('img[data-photo]:not([src])')) photoSrc(img.dataset.photo).then(src => { img.src = src; }).catch(() => { img.alt = 'โหลดรูปไม่ได้'; img.classList.add('broken'); });
+}
+// Phone pictures are large: keep the long side at 1600 px, JPEG.
+async function shrinkPhoto(file, max = 1600) {
+  const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }).catch(() => createImageBitmap(file))
+    .catch(() => { throw new Error(`อ่านไฟล์รูป ${file.name || ''} ไม่ได้ ใช้รูป JPG หรือ PNG`); });
+  const k = Math.min(1, max / Math.max(bmp.width, bmp.height));
+  const c = Object.assign(document.createElement('canvas'), { width: Math.round(bmp.width * k), height: Math.round(bmp.height * k) });
+  c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+  return new Promise((ok, bad) => c.toBlob(b => (b ? ok(b) : bad(new Error('แปลงรูปไม่ได้'))), 'image/jpeg', 0.8));
+}
+function putLocal(entity, rec) {
+  const list = S.rec[entity], i = list.findIndex(r => r.id === rec.id);
+  const next = i >= 0 ? { ...list[i], ...rec } : rec;
+  if (i >= 0) list[i] = next; else list.push(next);
+  S.by[entity].set(rec.id, next);
+}
+function refreshPhotos(box) {
+  const [entity, id] = box.dataset.photos.split('|');
+  box.outerHTML = photosHtml(entity, S.by[entity].get(id));
+}
+let photoTarget = null;
+document.addEventListener('click', e => {
+  const add = e.target.closest('[data-photo-add]'), del = e.target.closest('[data-photo-del]'), img = e.target.closest('img[data-photo]');
+  const box = e.target.closest('.photos-box');
+  if (add && box) { photoTarget = box.dataset.photos; $('#photoInput').click(); return; }
+  if (del && box) {
+    e.preventDefault();
+    return guard(async () => {
+      if (!(await confirmBox('ลบรูปนี้?', { ok: 'ลบรูป', danger: true }))) return;
+      const [entity, id] = box.dataset.photos.split('|'), path = del.dataset.photoDel;
+      await api('DELETE', `/api/${entity}/${encodeURIComponent(id)}/photos?path=${encodeURIComponent(path)}`);
+      if (WEB) await WEBAUTH.cloud.removePhotos([path]).catch(err => console.warn(err)); else await api('DELETE', `/api/photos/file?path=${encodeURIComponent(path)}`).catch(err => console.warn(err));
+      const rec = S.by[entity].get(id); putLocal(entity, { ...rec, photos: (rec.photos || []).filter(p => p.path !== path) });
+      const live = document.querySelector(`.photos-box[data-photos="${CSS.escape(box.dataset.photos)}"]`); if (live) { refreshPhotos(live); hydratePhotos(document); }
+      toast('ลบรูปแล้ว');
+    })();
+  }
+  if (img && img.src) {
+    const p = (S.by[box?.dataset.photos.split('|')[0]]?.get(box?.dataset.photos.split('|')[1])?.photos || []).find(x => x.path === img.dataset.photo);
+    $('#photoBig').src = img.src;
+    $('#photoMeta').textContent = [p?.by, whenTh(p?.at), p?.lat ? `พิกัด ${Number(p.lat).toFixed(6)}, ${Number(p.lon).toFixed(6)}` : ''].filter(Boolean).join(' · ');
+    $('#photoView').showModal();
+  }
+});
+$('#photoInput').addEventListener('change', guard(async e => {
+  const files = [...e.target.files]; e.target.value = '';
+  if (!files.length || !photoTarget) return;
+  const [entity, id] = photoTarget.split('|');
+  toast(`กำลังส่งรูป ${files.length} รูป…`);
+  for (const file of files) {
+    const blob = await shrinkPhoto(file);
+    const path = `${entity}/${id}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`;
+    if (WEB) await WEBAUTH.cloud.uploadPhoto(path, blob);
+    else await api('POST', '/api/photos/file', { path, data: await fileB64(blob), type: 'image/jpeg' });
+    if (WEB) photoCache.set(path, Promise.resolve(URL.createObjectURL(blob)));
+    const gps = map.gps;
+    putLocal(entity, await api('POST', `/api/${entity}/${encodeURIComponent(id)}/photos`, { path, lat: gps?.lat, lon: gps?.lon }));
+  }
+  const live = document.querySelector(`.photos-box[data-photos="${CSS.escape(photoTarget)}"]`);
+  if (live) { refreshPhotos(live); hydratePhotos(document); }
+  toast(`เพิ่มรูปแล้ว ${files.length} รูป`);
+}));
+
+// ---------- survey state of a parcel (กำลังสำรวจ / ต้องกลับไปซ้ำ / สำรวจเสร็จ) ----------
+// Progress over the parcels that have a land record.
+function surveyProgress() {
+  const sv = S.status?.summary?.survey || {};
+  const total = sv.parcels || S.rec?.lands?.length || 0, done = (sv.ready || 0) + (sv.done || 0);
+  return { total, done, pct: total ? Math.round(done / total * 1000) / 10 : 0, draft: sv.draft || 0, revisit: sv.revisit || 0, ready: sv.ready || 0, changed: sv.changed || 0 };
+}
+function surveyProgressHtml() {
+  const p = surveyProgress();
+  return `<div class="legend-progress" title="สำรวจเสร็จ ${p.done.toLocaleString()} จาก ${p.total.toLocaleString()} แปลง"><strong>สำรวจแล้ว ${p.done.toLocaleString()} / ${p.total.toLocaleString()} แปลง (${p.pct}%)</strong>
+    <div class="bar"><div style="width:${Math.min(100, p.pct)}%"></div></div></div>`;
+}
+// Once "สำรวจเสร็จ", the parcel's edits wait for the office to put them into LTAX.
+const whenTh = at => (at ? new Date(at).toLocaleString('th-TH', { dateStyle: 'short', timeStyle: 'short' }) : '');
+function surveyPill(r) {
+  const sv = r?.info?.survey;
+  if (!sv?.state) return '';
+  return `<span class="pill ${SURVEY_STYLE[sv.state][1]}" title="${esc(sv.by || '')} ${whenTh(sv.at)}${sv.note ? `\n${esc(sv.note)}` : ''}">${esc(SURVEY_STYLE[sv.state][0])}${sv.state === 'ready' ? ` ${sv.items} รายการ` : ''}</span>`;
+}
+// Small button for tables: sign off, or nothing once signed off.
+function surveyButton(r) {
+  if (!r?.code || !r.info?.landIds?.length) return '';
+  const st = r.info?.survey?.state;
+  return st === 'ready' || st === 'done' ? ''
+    : `<button class="primary edit-only small" data-survey="${esc(r.code)}" data-state="done" title="ส่งข้อมูลที่แก้ของแปลงนี้กลับไปรอลง LTAX">✓ สำรวจเสร็จ${st === 'changed' ? ' (อีกครั้ง)' : ''}</button>`;
+}
+// Full box for the parcel panel.
+function surveyBox(r) {
+  if (!r?.code) return '';
+  if (!r.info?.landIds?.length) return '<div class="survey-box"><b>การสำรวจ</b> <span class="muted">ยังไม่มีข้อมูลที่ดินของแปลงนี้ กด "สร้างข้อมูลที่ดินจากรูปนี้" ก่อน</span></div>';
+  const sv = r.info.survey, st = sv?.state;
+  const btn = (state, text, cls = '') => `<button class="${cls}${st === state || (state === 'done' && (st === 'ready' || st === 'done')) ? ' on' : ''}" data-survey="${esc(r.code)}" data-state="${state}">${text}</button>`;
+  return `<div class="survey-box"><b>การสำรวจ:</b> ${surveyPill(r) || '<span class="pill">ยังไม่สำรวจ</span>'}
+    ${sv ? `<span class="muted">${esc(sv.by || '')} ${whenTh(sv.at)}</span>` : ''}
+    ${sv?.note ? `<div class="muted">หมายเหตุ: ${esc(sv.note)}</div>` : ''}
+    <div class="row edit-only">${btn('draft', 'กำลังสำรวจ')}${btn('revisit', 'ต้องกลับไปซ้ำ…')}${btn('done', st === 'changed' ? '✓ สำรวจเสร็จ (อีกครั้ง)' : '✓ สำรวจเสร็จ', 'primary')}
+      ${st ? `<button data-survey="${esc(r.code)}" data-state="" title="ล้างสถานะการสำรวจ">ล้าง</button>` : ''}</div></div>`;
+}
+async function markSurvey(code, state) {
+  const r = S.statusBy?.get(code), old = r?.info?.survey;
+  const noteBox = (label, v) => `<label class="note-in"><span>${label}</span><textarea id="surveyNote" rows="2">${esc(v || '')}</textarea></label>`;
+  let note = '';
+  if (state === 'done') {
+    const todo = (r?.reasons || []).filter(x => x.level === 'fix' && !/สำรวจเสร็จ|สำรวจซ้ำ/.test(x.text));
+    if (!(await confirmBox(`ยืนยันว่าสำรวจแปลง <b>${esc(code)}</b> เสร็จแล้ว?<br><span class="muted">ข้อมูลที่แก้ของแปลงนี้ (ที่ดิน อาคาร เจ้าของ) จะไปรอให้สำนักงานลง LTAX</span>`
+      + (todo.length ? `<p>ระบบกลางยังแจ้งเรื่องเหล่านี้ไว้:</p><ul>${todo.map(x => `<li>${esc(x.text)}</li>`).join('')}</ul><span class="muted">เรื่องเนื้อที่ การใช้ประโยชน์ และเจ้าของ จะถือว่าผู้สำรวจตรวจแล้ว ส่วนข้อผิดพลาดต้องแก้ก่อนจึงจะลง LTAX ได้</span>` : '')
+      + noteBox('หมายเหตุ (ถ้ามี)', ''), { ok: 'สำรวจเสร็จ' }))) return;
+    note = $('#surveyNote').value;
+  } else if (state === 'revisit') {
+    if (!(await confirmBox(`แปลง <b>${esc(code)}</b> ต้องกลับไปสำรวจซ้ำ${noteBox('เหตุผล / สิ่งที่ต้องทำ', old?.state === 'revisit' ? old.note : '')}`, { ok: 'บันทึก' }))) return;
+    note = $('#surveyNote').value;
+  } else if (state === 'draft') note = old?.state === 'draft' ? old.note : '';
+  else if (!(await confirmBox(`ล้างสถานะการสำรวจของแปลง <b>${esc(code)}</b>?<br><span class="muted">แปลงนี้จะกลับเป็น "ยังไม่สำรวจ" และไม่อยู่ในรายการรอลง LTAX</span>`))) return;
+  const res = await api('POST', `/api/parcels/${encodeURIComponent(code)}/survey`, { state, note });
+  toast(!state ? `ล้างสถานะการสำรวจแปลง ${code} แล้ว` : state !== 'done' ? `แปลง ${code}: ${SURVEY_STYLE[state][0]}`
+    : res.state === 'ready' ? `แปลง ${code} สำรวจเสร็จ รอลง LTAX ${res.items.length} รายการ` : `แปลง ${code} สำรวจเสร็จ (ไม่มีข้อมูลที่ต่างจาก LTAX)`);
+  await loadStatuses();
+  if ($('#mapColor').value === 'survey') refreshMap();
+  renderActiveTab();
+  if (activeTab === 'map' && map.selected) showFeature(map.selected);
+}
+document.addEventListener('click', e => {
+  const b = e.target.closest('button[data-survey]'); if (!b) return;
+  e.stopPropagation();
+  guard(() => markSurvey(b.dataset.survey, b.dataset.state || null))();
+}, true);
+const statusOfFeature = f => S.statusBy?.get(f.code ? f.code.toUpperCase() : `#${f.id}`) || null;
 async function loadState() {
   const st = await api('GET', '/api/state');
   S.settings = st.settings;
@@ -80,7 +275,7 @@ async function loadChecks() {
 }
 async function reloadAll() {
   await Promise.all([loadRecords(), loadFeatures(), loadState(), loadChecks()]);
-  await loadIssues();
+  await Promise.all([loadIssues(), loadStatuses()]);
   S.overlay = S.features.some(f => f.kind === 'building') ? await api('GET', '/api/reports/overlay') : null;
   refreshMap(true);
   renderActiveTab();
@@ -96,7 +291,7 @@ $('#tabs').addEventListener('click', e => {
   renderActiveTab();
 });
 function renderActiveTab() {
-  ({ map: () => map.resize(), registry: renderRegistry, checks: renderChecks, changes: renderChanges, ltax: renderLtax, data: renderData, settings: renderSettings }[activeTab] || (() => {}))();
+  ({ map: () => map.resize(), status: renderStatus, registry: renderRegistry, checks: renderChecks, changes: renderChanges, ltax: renderLtax, data: renderData, settings: renderSettings }[activeTab] || (() => {}))();
 }
 
 // ---------- map ----------
@@ -125,6 +320,18 @@ function pushState(entity, rec) {
   return ['#b7dfc2', 'ตรงกับ LTAX'];
 }
 const STYLE = {
+  survey: f => {
+    if (f.kind === 'building') return ['#555555', 'อาคาร'];
+    const code = (f.code || '').toUpperCase();
+    const st = statusOfFeature(f)?.info?.survey?.state || S.surveyBy?.get(code)?.state;
+    if (st) return [SURVEY_STYLE[st][2], SURVEY_STYLE[st][0]];
+    return S.landByCode.get(code) ? ['#bdbdbd', 'ยังไม่สำรวจ'] : ['#8d6e63', 'ยังไม่มีข้อมูลที่ดิน'];
+  },
+  status: f => {
+    if (f.kind === 'building') return ['#555555', 'อาคาร'];
+    const r = statusOfFeature(f);
+    return r ? STATUS_STYLE[r.status] : ['#bbbbbb', 'ยังไม่มีผลตรวจจากระบบกลาง'];
+  },
   saved: (f, rec) => pushState(f.kind === 'building' ? 'buildings' : 'lands', rec),
   link: (f, rec) => {
     const chk = f.code && S.checks.get(`${f.kind}:${f.code}`);
@@ -171,11 +378,12 @@ function refreshMap(fit = false) {
       style: f => {
         const [color, text] = STYLE[mode](f, recordOfFeature(f));
         legend.set(text, color);
+        const dash = mode === 'survey' && text === SURVEY_STYLE.revisit[0] ? [6, 4] : null;
         // On satellite imagery: faint fill, bright line with a dark halo so boundaries stay visible.
         if (map.basemap === 'satellite') return f.kind === 'building'
           ? { fill: hexA(color, 0.45), stroke: '#ffffff', halo: 'rgba(0,0,0,.65)', width: 1.2 }
-          : { fill: hexA(color, 0.12), stroke: lighten(color, 0.45), halo: 'rgba(0,0,0,.6)', width: 1.8 };
-        return { fill: hexA(color, f.kind === 'building' ? 0.75 : 0.35), stroke: f.kind === 'building' ? '#1d2733' : hexA(color, 1), width: f.kind === 'building' ? 0.8 : 1 };
+          : { fill: hexA(color, 0.12), stroke: lighten(color, 0.45), halo: 'rgba(0,0,0,.6)', width: dash ? 2.6 : 1.8, dash };
+        return { fill: hexA(color, f.kind === 'building' ? 0.75 : 0.35), stroke: f.kind === 'building' ? '#1d2733' : hexA(color, 1), width: f.kind === 'building' ? 0.8 : dash ? 2.2 : 1, dash };
       },
       label: f => f.code, labelRes: layer.kind === 'building' ? 0.25 : 1.5,
     });
@@ -188,7 +396,7 @@ function refreshMap(fit = false) {
     const k = `${f.kind === 'building' && mode !== 'overlay' ? 'อาคาร: ' : ''}${text}`;
     counts.set(k, { color, n: (counts.get(k)?.n || 0) + 1 });
   }
-  $('#mapLegend').innerHTML = [...counts].map(([t, { color, n }]) => `<span><i style="background:${color}"></i>${esc(t)} <b>${n.toLocaleString()}</b></span>`).join('');
+  $('#mapLegend').innerHTML = (mode === 'survey' ? surveyProgressHtml() : '') + [...counts].map(([t, { color, n }]) => `<span><i style="background:${color}"></i>${esc(t)} <b>${n.toLocaleString()}</b></span>`).join('');
   $('#layerToggles').innerHTML = order.map(l => `<label><input type="checkbox" data-layer="${l.id}" ${map.layers.find(x => x.id === l.id)?.visible !== false ? 'checked' : ''}> ${esc(l.name)} (${l.count.toLocaleString()})</label>`).join('');
   if (fit && S.features.length && !refreshMap.fitted) { map.fit(S.features.filter(f => f.kind === 'parcel').length ? S.features.filter(f => f.kind === 'parcel') : S.features); refreshMap.fitted = true; }
   // Keep the multi-selection pointing at the freshly loaded shapes.
@@ -214,6 +422,20 @@ $('#mapSearch').addEventListener('change', e => {
   showFeature(map.selected);
 });
 
+function statusHtml(f) {
+  if (f.kind !== 'parcel') return '';
+  const r = statusOfFeature(f);
+  if (!r) {
+    // No result from the central system yet: the survey can still record its work.
+    const code = (f.code || '').toUpperCase(), land = code && S.landByCode.get(code), sv = S.surveyBy?.get(code);
+    return code ? surveyBox({ code, info: { landIds: land ? [land.id] : [], survey: sv ? { state: sv.state, at: sv.at, by: sv.by, note: sv.note, items: sv.items.length } : null } }) : '';
+  }
+  const [, text, cls] = STATUS_STYLE[r.status];
+  const todo = r.reasons.filter(x => x.level !== 'note');
+  return `<div class="status-box ${cls}"><b>สถานะจากระบบกลาง: ${esc(text)}</b> <span class="muted">${esc(LINK_TH[r.link] || '')} · ${esc(LTAX_TH[r.ltax] || '')}</span>
+    ${todo.length ? `<ul>${todo.map(x => `<li>${esc(x.text)}</li>`).join('')}</ul>` : ''}
+    </div>${surveyBox(r)}`;
+}
 async function showFeature(f) {
   const side = $('#mapSide');
   if (!f) { side.classList.remove('open'); side.innerHTML = '<div class="empty">คลิกรูปแปลงหรืออาคารบนแผนที่เพื่อดูข้อมูล</div>'; return; }
@@ -227,25 +449,27 @@ async function showFeature(f) {
   let recHtml = '';
   if (rec && entity === 'lands') {
     recHtml = `<dl class="kv">
-      <dt>เจ้าของ</dt><dd>${esc(ownerNames(rec.ownerIds)) || '-'}</dd>
+      <dt>เจ้าของ</dt><dd>${ownerCards(rec.ownerIds)}</dd>
       <dt>เอกสารสิทธิ์</dt><dd>${esc(label(DOC_TYPES, rec.docType))} ${esc(rec.docNo)}</dd>
       <dt>เลขที่ดิน / หน้าสำรวจ</dt><dd>${esc(rec.parcelNo || '-')} / ${esc(rec.dealingFileNo || '-')}</dd>
       <dt>หมู่ / ตำบล</dt><dd>${esc(rec.villageNo || '-')} / ${esc(rec.district || '-')}</dd>
       <dt>เนื้อที่ตามเอกสาร</dt><dd>${formatRNW(rec.rai, rec.ngan, rec.wah)} (${formatNumber(toWah(rec.rai, rec.ngan, rec.wah))} ตร.ว.)</dd>
       <dt>การใช้ประโยชน์</dt><dd>${(rec.uses || []).map(u => `${esc(label(LAND_USE_TYPES, u.usedType))} ${formatRNW(u.rai, u.ngan, u.wah)}`).join('<br>') || '-'}</dd>
       <dt>ราคาประเมิน</dt><dd>${rec.pricePerWah ? `${formatNumber(rec.pricePerWah)} บาท/ตร.ว. · รวม ${formatNumber(landTotal(rec))} บาท` : '<span class="pill warn">ยังไม่มี</span>'}${rec.ltaxValues?.tax ? `<br>ภาษีตาม LTAX ${formatNumber(rec.ltaxValues.tax)} บาท` : ''}</dd>
-      <dt>สิ่งปลูกสร้าง</dt><dd>${S.rec.buildings.filter(b => (b.landIds || []).includes(rec.id)).map(b => esc(b.buildingCode || b.addrNo)).join(', ') || '-'}</dd>
+      <dt>สิ่งปลูกสร้าง</dt><dd>${S.rec.buildings.filter(b => (b.landIds || []).includes(rec.id)).map(b => `<button class="link" data-goto-building="${esc(b.id)}" title="ไปที่อาคารนี้">${esc(b.buildingCode || b.addrNo || 'อาคาร')}</button>`).join(' ') || '-'}</dd>
+      <dt>ป้าย</dt><dd>${(S.rec.signboards || []).filter(s => s.landId === rec.id).map(s => `<button class="link" data-open-sign="${esc(s.id)}">${esc(s.signboardName || s.signboardCode || 'ป้าย')}</button>`).join(' ') || '-'}</dd>
     </dl>`;
   } else if (rec) {
     recHtml = `<dl class="kv">
       <dt>เจ้าของ</dt><dd>${esc(ownerNames(rec.ownerIds)) || '-'}</dd>
       <dt>เลขที่ / หมู่</dt><dd>${esc(rec.addrNo || '-')} / ${esc(rec.villageNo || '-')}</dd>
       <dt>ประเภท</dt><dd>${esc(buildingTypeLabel(rec.buildingType)) || '-'}</dd>
+      <dt>เจ้าของ (รายละเอียด)</dt><dd>${ownerCards(rec.ownerIds)}</dd>
       <dt>ชั้น / พื้นที่</dt><dd>${esc(rec.noFloor || '-')} ชั้น / ${formatNumber(rec.totalArea)} ตร.ม.</dd>
       <dt>สร้างเสร็จ</dt><dd>${esc(rec.since || '-')}</dd>
       <dt>ราคาประเมิน</dt><dd>${(() => { const v = buildingValue(rec, S.deprTable); return rec.pricePerMeter ? `${formatNumber(rec.pricePerMeter)} บาท/ตร.ม. · ทุนทรัพย์ ${formatNumber(v.gross)} · หักค่าเสื่อม ${v.deprPct ?? '-'}% · คงเหลือ ${formatNumber(v.net)} บาท` : '<span class="pill warn">ยังไม่มี</span>'; })()}</dd>
       <dt>การใช้ประโยชน์</dt><dd>${(rec.uses || []).map(u => esc(label(LAND_USE_TYPES, u.usedType))).join('<br>') || '-'}</dd>
-      <dt>แปลงที่ตั้ง</dt><dd>${(rec.landIds || []).map(id => esc(S.by.lands.get(id)?.parcelCode)).join(', ') || '-'}</dd>
+      <dt>แปลงที่ตั้ง</dt><dd>${(rec.landIds || []).map(id => S.by.lands.get(id)).filter(Boolean).map(l => `<button class="link" data-goto-parcel="${esc(l.parcelCode)}">${esc(l.parcelCode)}</button>`).join(' ') || '-'}</dd>
     </dl>`;
   }
   side.classList.add('open');
@@ -255,19 +479,32 @@ async function showFeature(f) {
     <div>${rec ? `<span class="pill" style="background:${pushState(entity, rec)[0]}33">${esc(pushState(entity, rec)[1])}</span>` : ''}${rec ? `<span class="pill ok">มีในทะเบียน</span>${rec.pending === 'create' ? '<span class="pill info">ยังไม่มีใน LTAX</span>' : rec.pending === 'update' ? '<span class="pill warn">แก้ไขแล้ว รอส่ง</span>' : '<span class="pill ok">ตรงกับ LTAX</span>'}` : '<span class="pill err">ไม่มีในทะเบียน</span>'}
       ${chk ? `<span class="pill ${chk.found ? 'ok' : 'err'}">${chk.found ? (chk.count > 1 ? `พบใน LTAX ${chk.count} รายการ` : 'พบใน LTAX') : 'ไม่พบใน LTAX'} · ตรวจ ${new Date(chk.at).toLocaleDateString('th-TH')}</span>` : ''}
       ${ov ? `<span class="pill ${ov.result === 'ตรงแปลง' || ov.result === 'แปลงซ้อนกัน' ? 'ok' : 'warn'}">${esc(ov.result)}${ov.foundParcels ? ` (${esc(ov.foundParcels)})` : ''}</span>` : ''}</div>
+    ${statusHtml(f)}
     ${recHtml}
+    ${rec ? photosHtml(entity, rec) : ''}
     ${f.code && f.kind !== 'other' ? '<div class="row"><button id="liveLtax" title="อ่านข้อมูลปัจจุบันจาก LTAX ONLINE มาแสดง ไม่บันทึกเก็บไว้">⟳ ดูข้อมูลสดจาก LTAX</button></div><div id="liveBox"></div>' : ''}
     ${issues.length ? `<ul class="issues">${issues.map(i => `<li class="${i.level}">${esc(i.message)}</li>`).join('')}</ul>` : ''}
     <div class="row">
       ${rec ? `<button class="primary" id="sideEdit">แก้ไขข้อมูลทะเบียน</button>` : f.kind !== 'other' ? `<button class="primary" id="sideCreate">สร้างข้อมูล${f.kind === 'parcel' ? 'ที่ดิน' : 'สิ่งปลูกสร้าง'}จากรูปนี้</button>` : ''}
     </div>
-    <div class="row">${/Polygon/.test(f.geometry.type) ? '<button id="shapeEdit">✎ แก้ไขรูป</button>' : ''}
+    <div class="row">${navLink(f)}${/Polygon/.test(f.geometry.type) ? '<button id="shapeEdit">✎ แก้ไขรูป</button>' : ''}
       ${f.kind === 'parcel' ? '<button id="shapeAddBuilding">▭ วาดอาคารในแปลงนี้</button>' : ''}<button class="danger" id="shapeDelete">ลบรูป</button></div>
     <h4>ข้อมูลรูปแปลง (แก้ไขได้)</h4>
     <div class="form-row"><label>รหัส${layer?.codeField ? ` (${esc(layer.codeField)})` : ''}</label><input id="featCode" value="${esc(f.code)}"></div>
     <table class="grid attrs">${Object.entries(full.attrs || {}).map(([k, v]) => `<tr><th>${esc(k)}</th><td><input data-attr="${esc(k)}" value="${esc(v ?? '')}"></td></tr>`).join('')}</table>
     <div class="row"><button id="featSave">บันทึกข้อมูลรูปแปลง</button></div>`;
   $('#sideEdit')?.addEventListener('click', () => openEditor(entity, rec.id));
+  hydratePhotos(side);
+  side.querySelectorAll('[data-open-owner]').forEach(b => b.addEventListener('click', () => openEditor('owners', b.dataset.openOwner)));
+  side.querySelectorAll('[data-open-sign]').forEach(b => b.addEventListener('click', () => openEditor('signboards', b.dataset.openSign)));
+  side.querySelectorAll('[data-goto-building], [data-goto-parcel]').forEach(b => b.addEventListener('click', () => {
+    const bld = b.dataset.gotoBuilding && S.by.buildings.get(b.dataset.gotoBuilding);
+    const code = bld ? bld.buildingCode : b.dataset.gotoParcel;
+    const shape = code && map.layers.flatMap(l => l.features).find(x => x.code && x.code.toUpperCase() === String(code).toUpperCase());
+    if (shape) { map.selected = shape; map.zoomTo(shape); showFeature(shape); }
+    else if (bld) openEditor('buildings', bld.id);
+    else toast('ไม่พบรูปบนแผนที่', true);
+  }));
   $('#sideClose').addEventListener('click', () => { map.selected = null; map.draw(); showFeature(null); });
   $('#liveLtax')?.addEventListener('click', guard(async () => {
     if (S.session.mode !== 'ltax') return toast('ต้องเข้าสู่ระบบด้วย DLA SSO ก่อน', true);
@@ -578,6 +815,7 @@ function openEditor(entity, id, preset = {}) {
         ${['lands', 'buildings', 'signboards'].includes(entity) ? linkHtml('ownerIds', 'เจ้าของกรรมสิทธิ์', (rec.ownerIds || []).map(oid => ({ id: oid, text: ownerName(S.by.owners.get(oid)) || '(ไม่พบ)' })), 'dl-owners', ownerOpts) : ''}
         ${entity === 'lands' ? assetsOnLand(rec) : ''}
         ${entity === 'buildings' ? linkHtml('landIds', 'แปลงที่ดินที่ตั้ง', (rec.landIds || []).map(lid => ({ id: lid, text: S.by.lands.get(lid)?.parcelCode || '(ไม่พบ)' })), 'dl-lands', landOpts) : ''}
+        ${id ? photosHtml(entity, S.by[entity].get(id)) : ''}
       </div>
       <div class="foot">${id ? '<button type="button" class="danger" id="delRec">ลบในเครื่อง</button>' : ''}<span class="grow"></span>
         <button type="button" data-close>ยกเลิก</button><button type="button" class="primary" id="saveRec">บันทึก</button></div>`;
@@ -586,6 +824,7 @@ function openEditor(entity, id, preset = {}) {
       const used = entity === 'lands' ? (rec.uses || []).reduce((s, u) => s + toWah(u.rai, u.ngan, u.wah), 0) : (rec.uses || []).reduce((s, u) => s + (num(u.area) || 0), 0);
       $('#useSum').textContent = `ใช้แล้ว ${formatNumber(used)} จาก ${formatNumber(total)} ${entity === 'lands' ? 'ตร.ว.' : 'ตร.ม.'}`;
     }
+    hydratePhotos(form);
   };
   const read = () => {
     for (const el of form.querySelectorAll('[name]')) {
@@ -686,6 +925,68 @@ $('#chkTable').addEventListener('click', e => {
   } else openEditor(tr.dataset.e, tr.dataset.id);
 });
 
+// ---------- parcel status (central system → Supabase → survey) ----------
+function statusSummaryHtml(sm) {
+  if (!sm) return '';
+  const top = Object.entries(sm.reasons || {}).sort((a, b) => b[1] - a[1]).slice(0, 6);
+  return `<div class="status-sum"><b>สรุปการเชื่อมข้อมูล ${sm.total.toLocaleString()} แปลง</b>
+    <span class="pill ok">ข้อมูลตรง ${sm.ok.toLocaleString()}</span><span class="pill err">ต้องปรับแก้ ${sm.fix.toLocaleString()}</span><span class="pill warn">รอ LTAX ${sm.send.toLocaleString()}</span>
+    ${top.length ? `<ul>${top.map(([k, n]) => `<li>${esc(k)}: ${n.toLocaleString()}</li>`).join('')}</ul>` : ''}
+    <span class="muted">${WEB ? '' : S.settings.cloud?.enabled ? 'ส่งสถานะแต่ละแปลงขึ้น Supabase ให้ระบบสำรวจแล้ว (ภายในไม่กี่วินาที)' : 'เปิดซิงก์ Supabase ในหน้าตั้งค่า เพื่อส่งสถานะให้ระบบสำรวจ'}</span></div>`;
+}
+let stView = 'fix', stPage = 0;
+$('#stLink').innerHTML += Object.entries(LINK_TH).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('');
+$('#stView').addEventListener('click', e => {
+  const b = e.target.closest('button[data-v]'); if (!b) return;
+  stView = b.dataset.v; stPage = 0; $$('#stView button').forEach(x => x.classList.toggle('on', x === b)); renderStatus();
+});
+$('#stLink').addEventListener('change', () => { stPage = 0; renderStatus(); });
+$('#stSearch').addEventListener('input', () => { stPage = 0; renderStatus(); });
+$('#stSummary').addEventListener('click', e => {
+  const s = e.target.closest('[data-sv]');
+  if (s) { $('#stSurvey').value = s.dataset.sv; stView = ''; $$('#stView button').forEach(x => x.classList.toggle('on', x.dataset.v === '')); stPage = 0; return renderStatus(); }
+  const c = e.target.closest('[data-q]'); if (c) { $('#stSearch').value = c.dataset.q; stPage = 0; renderStatus(); }
+});
+$('#stSurvey').addEventListener('change', () => { stPage = 0; renderStatus(); });
+function renderStatus() {
+  const st = S.status;
+  if (!st) return;
+  const sm = st.summary;
+  $('#stWhen').textContent = st.checkedAt ? `ระบบกลางตรวจล่าสุด ${new Date(st.checkedAt).toLocaleString('th-TH')}` : WEB ? 'ยังไม่มีผลตรวจจากระบบกลาง (เครื่องสำนักงานยังไม่ได้ส่งขึ้น)' : '';
+  $('#stSummary').innerHTML = `<div class="card ok"><b>${sm.ok.toLocaleString()}</b>ข้อมูลตรง</div><div class="card err"><b>${sm.fix.toLocaleString()}</b>ต้องปรับแก้ในระบบสำรวจ</div><div class="card warn"><b>${sm.send.toLocaleString()}</b>รอดำเนินการใน LTAX</div>`
+    + (() => { const p = surveyProgress(); return `<div class="card info click" data-sv="ready+done"><b>${p.pct}%</b>สำรวจแล้ว ${p.done.toLocaleString()} / ${p.total.toLocaleString()} แปลง<div class="bar"><div style="width:${Math.min(100, p.pct)}%"></div></div></div>`
+      + `<div class="card click" data-sv="draft"><b>${p.draft.toLocaleString()}</b>กำลังสำรวจ</div><div class="card err click" data-sv="revisit"><b>${p.revisit.toLocaleString()}</b>ต้องกลับไปสำรวจซ้ำ</div>`
+      + `<div class="card ok click" data-sv="ready"><b>${p.ready.toLocaleString()}</b>สำรวจเสร็จ รอลง LTAX</div>`
+      + (p.changed ? `<div class="card warn click" data-sv="changed"><b>${p.changed.toLocaleString()}</b>แก้ไขหลังกดสำรวจเสร็จ</div>` : ''); })()
+    + Object.entries(sm.reasons).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, n]) => `<div class="card click" data-q="${esc(k.split('…')[0].trim())}"><b>${n.toLocaleString()}</b>${esc(k)}</div>`).join('');
+  const q = $('#stSearch').value.trim().toUpperCase(), lk = $('#stLink').value;
+  const sq = $('#stSurvey').value, svOk = r => !sq || (sq === 'none' ? !r.survey && r.info?.landIds?.length : sq.split('+').includes(r.survey));
+  const rows = st.rows.filter(r => (!stView || r.status === stView) && svOk(r) && (!lk || r.link === lk) && (!q || r.code.includes(q) || r.reasons.some(x => x.text.toUpperCase().includes(q))));
+  stPage = Math.min(stPage, Math.max(0, Math.ceil(rows.length / PAGE) - 1));
+  const wah = v => (v === null || v === undefined ? '-' : formatNumber(v));
+  $('#stTable').innerHTML = '<tr><th>รหัสแปลง</th><th>สถานะ</th><th>การเชื่อมโยง</th><th>LTAX</th><th>เนื้อที่ ตร.ว. (เอกสาร / แผนที่)</th><th>สิ่งที่ต้องทำ</th><th>การสำรวจ</th></tr>'
+    + rows.slice(stPage * PAGE, stPage * PAGE + PAGE).map(r => `<tr class="click" data-id="${esc(r.id)}"><td>${esc(r.code || '(ไม่มีรหัส)')}</td>
+      <td><span class="pill ${STATUS_STYLE[r.status][2]}">${esc(STATUS_STYLE[r.status][1])}</span></td><td>${esc(LINK_TH[r.link] || r.link)}</td><td>${esc(LTAX_TH[r.ltax] || r.ltax)}</td>
+      <td class="num">${wah(r.info?.areaDocWah)} / ${wah(r.info?.areaMapWah)}</td>
+      <td>${r.reasons.filter(x => x.level !== 'note').map(x => esc(x.text)).join('<br>') || '<span class="muted">-</span>'}</td>
+      <td>${surveyPill(r)}${surveyButton(r)}</td></tr>`).join('');
+  const pages = Math.max(1, Math.ceil(rows.length / PAGE));
+  $('#stPager').innerHTML = `<button ${stPage ? '' : 'disabled'} data-p="-1">‹</button> หน้า ${stPage + 1} / ${pages} · ${rows.length.toLocaleString()} แปลง <button ${stPage + 1 < pages ? '' : 'disabled'} data-p="1">›</button>`;
+}
+$('#stPager').addEventListener('click', e => { const b = e.target.closest('button[data-p]'); if (b) { stPage += Number(b.dataset.p); renderStatus(); } });
+$('#stTable').addEventListener('click', e => {
+  const tr = e.target.closest('tr[data-id]'); if (!tr) return;
+  const r = S.statusBy.get(tr.dataset.id); if (!r) return;
+  const f = (r.info?.featureIds || []).map(id => map.layers.flatMap(l => l.features).find(x => x.id === id)).find(Boolean);
+  if (f) { $('#tabs button[data-tab="map"]').click(); map.selected = f; map.zoomTo(f); showFeature(f); }
+  else if (r.info?.landIds?.[0]) openEditor('lands', r.info.landIds[0]);
+});
+$('#stPublish').addEventListener('click', guard(async () => {
+  const r = await api('POST', '/api/parcel-status/publish');
+  toast(`ส่งสถานะขึ้น Supabase แล้ว ${r.sent.toLocaleString()} แปลง`);
+  await loadStatuses(); renderStatus();
+}));
+
 // ---------- changes ----------
 let chgView = 'pending';
 $('#chgView').addEventListener('click', e => {
@@ -706,18 +1007,20 @@ async function renderChanges() {
     }).join('') || '<p class="muted">ยังไม่มีประวัติ</p>';
     return;
   }
-  const list = await api('GET', '/api/changes');
+  let list = await api('GET', '/api/changes');
+  const readyOf = new Map((S.survey || []).filter(s => s.state === 'ready').flatMap(s => s.items.map(it => [`${it.entity}:${it.recordId}`, s.code])));
+  if (chgView === 'ready') list = list.filter(c => readyOf.has(`${c.entity}:${c.id}`));
   const errIds = new Set(S.issues.filter(i => i.level === 'error').map(i => i.id));
   const by = list.reduce((m, c) => ((m[`${c.entityTh}|${c.action}`] = (m[`${c.entityTh}|${c.action}`] || 0) + 1), m), {});
   $('#chgSummary').innerHTML = Object.entries(by).map(([k, n]) => { const [e, a] = k.split('|'); return `<div class="card ${a === 'create' ? '' : 'warn'}"><b>${n.toLocaleString()}</b>${esc(e)} ${a === 'create' ? 'ยังไม่มีใน LTAX' : 'แก้ไขแล้ว รอส่ง'}</div>`; }).join('')
-    || '<div class="card ok"><b>0</b>ข้อมูลตรงกับ LTAX ทั้งหมด</div>';
+    || (chgView === 'ready' ? '<div class="card"><b>0</b>ยังไม่มีแปลงที่สำรวจเสร็จและรอลง LTAX</div>' : '<div class="card ok"><b>0</b>ข้อมูลตรงกับ LTAX ทั้งหมด</div>');
   const shown = list.slice(0, 500);
   if (S.deletions.length) $('#chgSummary').insertAdjacentHTML('beforeend', `<div class="card err"><b>${S.deletions.length.toLocaleString()}</b>ลบในเครื่องแล้ว รอลบใน LTAX</div>`);
   const delHtml = S.deletions.length ? `<div class="item"><header><b>รอลบใน LTAX (${S.deletions.length})</b><span class="muted">L-LAN ไม่ลบใน LTAX ให้ ต้องลบในระบบเอง แล้วกด "ลบใน LTAX แล้ว"</span></header>
     <ul>${S.deletions.map(x => `<li>${esc(ENTITY_TH[x.entity])} ${esc(x.title)} (รหัสใน LTAX ${esc(x.ltaxId)}) <button data-deldone="${esc(x.id)}">ลบใน LTAX แล้ว</button></li>`).join('')}</ul></div>` : '';
   $('#chgList').innerHTML = delHtml + `<div class="row"><label class="check"><input type="checkbox" id="chgAll"> เลือกทั้งหมด (ไม่รวมรายการที่มีข้อผิดพลาด)</label><span class="muted">${list.length > 500 ? `แสดง 500 จาก ${list.length.toLocaleString()} รายการ` : ''}</span></div>`
     + shown.map(c => `<div class="item"><header><input type="checkbox" data-sel="${c.entity}:${c.id}" ${S.selected.has(`${c.entity}:${c.id}`) ? 'checked' : ''} ${errIds.has(c.id) ? 'disabled title="มีข้อผิดพลาด ต้องแก้ก่อนส่ง"' : ''}>
-      <b>${esc(c.entityTh)} ${esc(c.title)}</b> <span class="pill ${c.action === 'create' ? 'info' : 'warn'}">${c.action === 'create' ? 'ยังไม่มีใน LTAX' : `แก้ ${c.changes.length} ช่อง`}</span>
+      <b>${esc(c.entityTh)} ${esc(c.title)}</b> ${readyOf.has(`${c.entity}:${c.id}`) ? `<span class="pill info">สำรวจเสร็จ แปลง ${esc(readyOf.get(`${c.entity}:${c.id}`))}</span>` : ''}<span class="pill ${c.action === 'create' ? 'info' : 'warn'}">${c.action === 'create' ? 'ยังไม่มีใน LTAX' : `แก้ ${c.changes.length} ช่อง`}</span>
       ${errIds.has(c.id) ? '<span class="pill err">มีข้อผิดพลาด</span>' : ''}<span class="grow"></span><button data-open="${c.entity}:${c.id}">เปิด</button></header>
       ${c.changes.length ? `<ul>${c.changes.map(x => `<li>${esc(x.th)}: <span class="from">${esc(x.before || '(ว่าง)')}</span> → <span class="to">${esc(x.after || '(ว่าง)')}</span></li>`).join('')}</ul>` : ''}</div>`).join('');
   $('#chgAll').onchange = e => { for (const c of list) if (!errIds.has(c.id)) e.target.checked ? S.selected.add(`${c.entity}:${c.id}`) : S.selected.delete(`${c.entity}:${c.id}`); renderChanges(); };
@@ -756,7 +1059,9 @@ function scopeItems() {
   const scope = $('#jobScope').value, limit = Infinity;
   const errIds = new Set(S.issues.filter(i => i.level === 'error').map(i => i.id));
   let items = [];
+  const ready = (S.survey || []).filter(s => s.state === 'ready');
   if ($('#jobType').value === 'check') {
+    if (scope === 'survey-ready') return ready.map(s => ({ kind: 'parcel', code: s.code }));
     const shapes = S.features.filter(f => f.code && (scope === 'buildings-shapes' ? f.kind === 'building' : f.kind === 'parcel'));
     const pick = scope === 'parcels-unchecked' ? shapes.filter(f => !S.checks.has(`parcel:${f.code}`))
       : scope === 'parcels-unjoined' ? shapes.filter(f => !recordOfFeature(f))
@@ -765,6 +1070,7 @@ function scopeItems() {
     return [...new Map(pick.map(f => [`${f.kind}:${f.code}`, { kind: f.kind, code: f.code }])).values()].slice(0, limit);
   }
   if (scope === 'selected') items = [...S.selected].map(k => { const [entity, recordId] = k.split(':'); return { entity, recordId }; });
+  else if (scope === 'survey-ready') items = [...new Map(ready.flatMap(s => s.items).filter(it => !errIds.has(it.recordId)).map(it => [`${it.entity}:${it.recordId}`, it])).values()];
   else if (scope === 'lands-all') items = S.rec.lands.filter(l => l.parcelCode).map(l => ({ entity: 'lands', recordId: l.id }));
   else items = ['owners', 'lands', 'buildings'].flatMap(e => S.rec[e].filter(r => r.pending && !errIds.has(r.id)).map(r => ({ entity: e, recordId: r.id })));
   return items.slice(0, limit);
@@ -784,6 +1090,7 @@ $('#jobStart').addEventListener('click', guard(async () => {
   if (S.session.mode !== 'ltax') return toast('ต้องเข้าสู่ระบบด้วย DLA SSO ก่อน (ตอนนี้ใช้งานแบบออฟไลน์)', true);
   if (type === 'push' && mode === 'real' && !(await confirmBox(`บันทึกจริงลง LTAX ONLINE <b>${items.length}</b> รายการ?<br><span class="muted">ระบบจะกดบันทึกในระบบจริงด้วยบัญชีที่เข้าสู่ระบบอยู่ และตรวจผลทุกรายการ</span>`))) return;
   currentJob = await api('POST', '/api/ltax/jobs', { type, mode, items });
+  if (currentJob.cloudWarning) toast(currentJob.cloudWarning, true);
   const next = (Number($('#jobFrom').value) || 1) + items.length;
   try { localStorage.setItem(scopeKey(), String(next)); } catch { /* no storage */ }
   $('#jobFrom').value = next;
@@ -835,9 +1142,11 @@ async function renderLtax() {
 }
 const JOB_TH = j => (j.type === 'check' ? 'ตรวจกับ LTAX' : j.type === 'pull' ? 'ดึงข้อมูล' : j.mode === 'real' ? 'บันทึกจริง' : 'ทดลอง');
 $('#jobHistory').addEventListener('click', guard(async e => { const tr = e.target.closest('tr[data-job]'); if (tr && e.target.tagName !== 'A') { currentJob = await api('GET', `/api/ltax/jobs/${tr.dataset.job}`); renderJob(); } }));
-const events = new EventSource('/api/ltax/events');
-events.onmessage = e => {
+function startEvents() { new EventSource('/api/ltax/events').onmessage = onEvent; }
+const onEvent = e => {
   const ev = JSON.parse(e.data);
+  // Changes made on the web arrived through the Supabase sync.
+  if (ev.type === 'cloud') { if (ev.changed && !document.querySelector('dialog[open]') && !map.tool) reloadAll(); if (activeTab === 'settings') renderSettings(); return; }
   if (!currentJob || ev.jobId !== currentJob.id) return;
   if (ev.type === 'item') { currentJob.items[ev.index] = ev.item; renderJob(); jobChip(); }
   if (ev.type === 'done') { loadChecks().then(() => refreshMap()); Object.assign(currentJob, ev.job, { items: currentJob.items }); $('#jobStop').disabled = true; renderJob(); jobChip(); toast('งานเสร็จแล้ว'); reloadAll(); }
@@ -854,6 +1163,7 @@ async function postXlsx(preview) {
   const c = r.report.counts;
   $('#xlsxResult').innerHTML = `<table><tr><td>เจ้าของ</td><td>${c.owners}</td></tr><tr><td>ที่ดิน</td><td>${c.lands} (การใช้ประโยชน์ ${c.landUses})</td></tr><tr><td>สิ่งปลูกสร้าง</td><td>${c.buildings} (การใช้ประโยชน์ ${c.buildingUses})</td></tr><tr><td>ป้าย</td><td>${c.signboards}</td></tr></table>`
     + (r.result ? `<p>นำเข้าแล้ว: เพิ่ม ${Object.values(r.result.added).reduce((a, b) => a + b, 0)} · ปรับตาม LTAX ${Object.values(r.result.updated).reduce((a, b) => a + b, 0)} · เก็บค่าที่แก้ในเครื่อง ${Object.values(r.result.keptLocal).reduce((a, b) => a + b, 0)}${r.result.conflicts.length ? ` · ขัดแย้ง ${r.result.conflicts.length}` : ''}</p>` : '')
+    + statusSummaryHtml(r.status)
     + (r.report.problems.length ? `<details><summary>ข้อสังเกต ${r.report.problems.length} รายการ</summary><ul>${r.report.problems.slice(0, 300).map(p => `<li>${esc(p.sheet)} ${esc(p.row)}: ${esc(p.message)}</li>`).join('')}</ul></details>` : '');
   if (!preview) { toast('นำเข้า Excel แล้ว'); await reloadAll(); }
 }
@@ -865,16 +1175,18 @@ $('#shpImport').addEventListener('click', guard(async () => {
   for (const f of files) { const m = f.name.match(/^(.*)\.(shp|dbf|shx|prj|cpg)$/i); if (m) { if (!groups.has(m[1])) groups.set(m[1], {}); groups.get(m[1])[m[2].toLowerCase()] = f; } }
   if (!groups.size) throw new Error('เลือกไฟล์ .shp และ .dbf ก่อน');
   const out = [];
+  let lastStatus = null;
   for (const [name, g] of groups) {
     if (!g.shp || !g.dbf) { out.push(`${name}: ขาดไฟล์ .shp หรือ .dbf`); continue; }
     $('#shpResult').textContent = `กำลังนำเข้า ${name}…`;
     const body = { name, kind: $('#shpKind').value, codeField: $('#shpCode').value.trim() || undefined, crs: $('#shpCrs').value };
     for (const ext of ['shp', 'dbf', 'shx', 'prj', 'cpg']) if (g[ext]) body[ext] = await fileB64(g[ext]);
     const r = await api('POST', '/api/import/shapefile', body);
+    lastStatus = r.status;
     const j = r.join;
     out.push(`${name}: ${r.layer.count.toLocaleString()} รูป · ${r.layer.kind === 'parcel' ? 'แปลงที่ดิน' : r.layer.kind === 'building' ? 'สิ่งปลูกสร้าง' : 'อื่น ๆ'} · ${r.layer.crs} · ช่องรหัส ${r.layer.codeField || '-'}${j ? ` · จอยได้ ${j.joined.toLocaleString()} จอยไม่ได้ ${j.notJoined.toLocaleString()}` : ''}`);
   }
-  $('#shpResult').innerHTML = out.map(esc).join('<br>');
+  $('#shpResult').innerHTML = out.map(esc).join('<br>') + statusSummaryHtml(lastStatus);
   refreshMap.fitted = false;
   await reloadAll();
 }));
@@ -908,8 +1220,10 @@ function renderSettings() {
   $('#cloudUrl').value = c.url || 'https://csbsrqbqnyiiwyypxyhj.supabase.co';
   $('#cloudKey').value = ''; $('#cloudKey').placeholder = c.hasKey ? 'บันทึก key ไว้แล้ว (ใส่ใหม่เฉพาะเมื่อจะเปลี่ยน)' : 'วางจาก Supabase → Project Settings → API Keys';
   $('#cloudOn').checked = !!c.enabled;
-  $('#cloudState').innerHTML = `${c.hasKey ? 'มี key แล้ว' : '<span class="pill warn">ยังไม่มี key</span>'} · ส่งอัตโนมัติ: <b>${c.enabled ? 'เปิด' : 'ปิด'}</b>`
-    + `${c.lastSync ? ` · ซิงก์ล่าสุด ${new Date(c.lastSync).toLocaleString('th-TH')}` : ''}${c.dirty ? ' · <span class="pill err">มีการแก้ไขที่ยังไม่ขึ้น Supabase กด "อัปโหลดรูปทั้งหมด"</span>' : ''}`;
+  const y = c.sync || {}, when = t => (t ? new Date(t).toLocaleString('th-TH') : '-');
+  $('#cloudState').innerHTML = `${c.hasKey ? 'มี key แล้ว' : '<span class="pill warn">ยังไม่มี key</span>'} · ซิงก์อัตโนมัติ: <b>${c.enabled ? 'เปิด' : 'ปิด'}</b>`
+    + ` · อัปโหลดทั้งหมดล่าสุด ${when(y.uploadedAt)} · ส่งล่าสุด ${when(y.lastPush)} · ดึงล่าสุด ${when(y.lastPull)}`
+    + `${y.queued ? ` · <span class="pill warn">รอส่ง ${y.queued.toLocaleString()} รายการ</span>` : ''}${y.error ? ` · <span class="pill err">${esc(y.error)}</span>` : ''}`;
 }
 const cloudSettings = () => ({ url: $('#cloudUrl').value.trim(), enabled: $('#cloudOn').checked, ...($('#cloudKey').value.trim() ? { key: $('#cloudKey').value.trim() } : {}) });
 async function saveCloud() { S.settings = await api('PUT', '/api/settings', { cloud: cloudSettings() }); renderSettings(); }
@@ -925,18 +1239,19 @@ $('#cloudTest').addEventListener('click', guard(async () => {
 }));
 $('#cloudPush').addEventListener('click', guard(async () => {
   await saveCloud();
-  if (!(await confirmBox(`อัปโหลดรูปทั้งหมด ${S.features.length.toLocaleString()} รูปขึ้น Supabase?<br><span class="muted">ส่งเฉพาะรูป รหัส พื้นที่ และช่องที่ไม่ใช่ข้อมูลส่วนบุคคล</span>`, { ok: 'อัปโหลด' }))) return;
-  $('#cloudState').textContent = 'กำลังอัปโหลด…';
+  if (!$('#cloudOn').checked) return toast('ติ๊ก "ซิงก์ข้อมูลกับ Supabase อัตโนมัติ" ก่อน', true);
+  const n = Object.values(S.rec).reduce((a, l) => a + l.length, 0);
+  if (!(await confirmBox(`อัปโหลดข้อมูลทั้งหมดขึ้น Supabase?<br>ทะเบียน ${n.toLocaleString()} รายการ (รวมชื่อ เลขบัตร ที่อยู่ของเจ้าของ) และรูป ${S.features.length.toLocaleString()} รูป<br><span class="muted">เฉพาะสมาชิกใน llan_members อ่านได้ การแก้ไขที่ทำบนเว็บแล้วจะถูกดึงมาก่อน ไม่ถูกทับ</span>`, { ok: 'อัปโหลด' }))) return;
+  $('#cloudState').textContent = 'กำลังอัปโหลด… (อาจใช้หลายนาที)';
   const r = await api('POST', '/api/cloud/push');
-  toast(`อัปโหลดแล้ว ${r.layers} ชั้น ${r.features.toLocaleString()} รูป`); await loadState(); renderSettings();
+  toast(`อัปโหลดแล้ว ทะเบียน ${r.records.toLocaleString()} รายการ · ${r.layers} ชั้น ${r.features.toLocaleString()} รูป`); await reloadAll(); renderSettings();
 }));
 $('#cloudPull').addEventListener('click', guard(async () => {
   await saveCloud();
-  const r0 = await api('GET', '/api/cloud/status');
-  if (!r0.ok) return toast(r0.message, true);
-  if (!(await confirmBox(`ดึงรูปจาก Supabase (${r0.features.toLocaleString()} รูป) มาแทนรูปในเครื่อง (${r0.local.toLocaleString()} รูป)?<br><span class="muted">รูปที่มีในเครื่องแต่ไม่มีใน Supabase จะหายไป ข้อมูลทะเบียนไม่ถูกแตะ</span>`, { ok: 'ดึงมาแทน', danger: true }))) return;
-  const r = await api('POST', '/api/cloud/pull');
-  toast(`ดึงแล้ว ${r.layers} ชั้น ${r.features.toLocaleString()} รูป`); refreshMap.fitted = false; await reloadAll(); renderSettings();
+  $('#cloudState').textContent = 'กำลังซิงก์…';
+  const r = await api('POST', '/api/cloud/sync');
+  const p = r.pulled || {};
+  toast(`ส่งขึ้น ${r.sent || 0} รายการ · รับจากเว็บ: ทะเบียน ${p.records || 0} รูป ${p.features || 0} ลบ ${p.deleted || 0}`); await reloadAll(); renderSettings();
 }));
 $('#setSave').addEventListener('click', guard(async () => {
   if ($('#setReal').checked && !S.settings.ltax?.realModeEnabled && !(await confirmBox('เปิดโหมดบันทึกจริงลง LTAX ONLINE?<br><span class="muted">L-LAN จะกดบันทึกในระบบจริงได้เมื่อสั่งงานแบบ "บันทึกจริง" เท่านั้น</span>'))) return;
@@ -954,6 +1269,7 @@ $('#setSave').addEventListener('click', guard(async () => {
 
 // ---------- sign-in ----------
 function showSession() {
+  if (WEB) return showWebSession();
   const s = S.session;
   $('#login').hidden = s.mode !== 'none';
   $('#userChip').innerHTML = s.mode === 'ltax' ? `${esc(s.user?.name || 'ผู้ใช้ LTAX')}<br><span style="opacity:.8">${esc(s.user?.org || '')}</span><button id="logout">ออกจากระบบ</button>`
@@ -981,9 +1297,102 @@ $('#loginSso').addEventListener('click', guard(async () => {
 }));
 $('#loginOffline').addEventListener('click', guard(async () => { S.session = await api('POST', '/api/session/offline'); showSession(); }));
 
+// ---------- web mode: Supabase sign-in, data in Supabase, downloads ----------
+const SB = () => String(CONFIG?.url || '').replace(/\/$/, '');
+const wsave = v => { try { v ? localStorage.setItem('llan.full.session', JSON.stringify(v)) : localStorage.removeItem('llan.full.session'); } catch { /* blocked */ } };
+const wload = () => { try { return JSON.parse(localStorage.getItem('llan.full.session')); } catch { return null; } };
+async function sbAuth(path, body) {
+  const res = await fetch(SB() + '/auth/v1/' + path, { method: 'POST', headers: { apikey: CONFIG.key, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(/invalid/i.test(d.error_description || d.msg || '') ? 'อีเมลหรือรหัสผ่านไม่ถูกต้อง' : d.error_description || d.msg || 'เข้าสู่ระบบไม่สำเร็จ');
+  return d;
+}
+function keepWeb(d) {
+  WEBAUTH.session = { access_token: d.access_token, refresh_token: d.refresh_token, expires_at: Date.now() + (d.expires_in || 3600) * 1000, email: d.user?.email || WEBAUTH.session?.email };
+  wsave(WEBAUTH.session);
+}
+async function webToken() {
+  const ws = WEBAUTH.session;
+  if (!ws) throw new Error('กรุณาเข้าสู่ระบบ');
+  if (ws.expires_at - Date.now() < 60000) {
+    try { keepWeb(await sbAuth('token?grant_type=refresh_token', { refresh_token: ws.refresh_token })); }
+    catch (err) { webSignOut('หมดเวลาการเข้าสู่ระบบ กรุณาเข้าสู่ระบบใหม่'); throw err; }
+  }
+  return WEBAUTH.session.access_token;
+}
+function webSignOut(msg = '') {
+  clearInterval(webOpen.timer);
+  Object.assign(WEBAUTH, { session: null, dispatch: null, store: null, role: null }); wsave(null);
+  S.session = { mode: 'none' }; showSession();
+  $('#loginState').textContent = msg;
+}
+function showWebSession() {
+  const s = S.session;
+  $('#login').hidden = !!s.user;
+  const ROLE = { viewer: 'ดูอย่างเดียว', editor: 'แก้ไขได้', admin: 'ผู้ดูแล' };
+  $('#userChip').innerHTML = s.user ? esc(s.user.email) + '<br><span style="opacity:.8">' + (ROLE[s.user.role] || '') + ' · ข้อมูลออนไลน์</span><button id="logout">ออกจากระบบ</button>' : '';
+  $('#logout')?.addEventListener('click', guard(async () => { if (await confirmBox('ออกจากระบบ?')) webSignOut(); }));
+}
+async function webOpen() {
+  const [{ Cloud }, { CloudStore }, { coreRoutes, router }] = await Promise.all([import('./lib/cloud.mjs'), import('./lib/cloud-store.mjs'), import('./lib/core-api.mjs')]);
+  const cloud = new Cloud({ url: SB(), key: CONFIG.key, token: webToken });
+  const email = WEBAUTH.session.email;
+  const role = await cloud.myRole(email);
+  if (!role) throw new Error('บัญชีนี้ยังไม่ได้รับสิทธิ์ใช้งาน (ให้ผู้ดูแลเพิ่มอีเมลใน llan_members)');
+  $('#loginState').textContent = 'กำลังโหลดข้อมูล…';
+  const store = await new CloudStore(cloud, { email }).open();
+  Object.assign(WEBAUTH, { store, role, cloud, dispatch: router(coreRoutes(store, { settings: () => ({ ...store.settings, cloud: {} }), state: () => ({ dataDir: 'Supabase (ออนไลน์)' }),
+    statuses: () => ({ rows: store.list('statuses'), checkedAt: store.statusCheckedAt }) })) });
+  document.body.classList.toggle('viewer', role === 'viewer');
+  S.session = { mode: 'web', user: { email, role } };
+  showSession();
+  await reloadAll();
+  clearInterval(webOpen.timer);
+  webOpen.timer = setInterval(() => webRefresh().catch(err => console.warn(err)), 30000);
+}
+// Others' changes, every 30 seconds, without disturbing an open form or drawing.
+async function webRefresh() {
+  if (!WEBAUTH.store || document.hidden || document.querySelector('dialog[open]') || map.tool) return;
+  const n = await WEBAUTH.store.refresh();
+  if (n) { await reloadAll(); toast('ข้อมูลอัปเดตจากผู้ใช้อื่น ' + n.toLocaleString() + ' รายการ'); }
+}
+function webStart() {
+  document.body.classList.add('web');
+  $('.login-box').innerHTML = '<img src="icon.svg" alt=""><h2>เข้าสู่ระบบ L-LAN</h2>'
+    + '<p class="muted">ใช้อีเมลและรหัสผ่านของบัญชี L-LAN ข้อมูลอยู่ใน Supabase แก้ไขได้จากทุกที่ การส่งเข้า LTAX ทำที่เครื่องสำนักงาน</p>'
+    + '<form id="webLogin"><input id="wEmail" type="email" placeholder="อีเมล" autocomplete="username" required>'
+    + '<input id="wPass" type="password" placeholder="รหัสผ่าน" autocomplete="current-password" required>'
+    + '<button class="primary big">เข้าสู่ระบบ</button></form><div id="loginState" class="state"></div>'
+    + '<a class="link" href="map.html">เปิดแผนที่อย่างเดียว (เบากว่า)</a>';
+  $('#webLogin').addEventListener('submit', guard(async e => {
+    e.preventDefault();
+    $('#loginState').textContent = 'กำลังเข้าสู่ระบบ…';
+    try { keepWeb(await sbAuth('token?grant_type=password', { email: $('#wEmail').value.trim(), password: $('#wPass').value })); }
+    catch (err) { $('#loginState').textContent = err.message; return; }
+    try { await webOpen(); } catch (err) { $('#loginState').textContent = err.message; }
+  }));
+  WEBAUTH.session = wload();
+  S.session = { mode: 'none' }; showSession();
+  if (WEBAUTH.session) webOpen().catch(err => { $('#loginState').textContent = err.message; });
+}
+// Downloads (Excel, .shp) are made in the browser on the web.
+if (WEB) document.addEventListener('click', e => {
+  const a = e.target.closest('a[href^="/api/"]');
+  if (!a) return;
+  e.preventDefault();
+  guard(async () => {
+    const out = await webApi('GET', a.getAttribute('href'));
+    if (!out?.download) return;
+    const link = Object.assign(document.createElement('a'), { href: URL.createObjectURL(new Blob([out.bytes], { type: out.type })), download: out.download });
+    document.body.append(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+  })();
+});
+
 // ---------- start ----------
 guard(async () => {
+  if (WEB) return webStart();
   S.session = await api('GET', '/api/session');
   showSession();
-  await reloadAll(); ltaxStatus(); setInterval(ltaxStatus, 15000);
+  await reloadAll(); ltaxStatus(); setInterval(ltaxStatus, 15000); startEvents();
 })();
