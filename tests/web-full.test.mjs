@@ -50,25 +50,30 @@ test('github.io page: sign in, see the register from Supabase, save an edit', { 
     const waitFor = async (js, ms = 6000) => { for (const end = Date.now() + ms; Date.now() < end; await sleep(150)) if (await ev(js)) return true; return false; };
     const login = async (email, pass) => {
       await ev(`document.querySelector('#wEmail').value = ${JSON.stringify(email)}; document.querySelector('#wPass').value = ${JSON.stringify(pass)}; document.querySelector('#webLogin').requestSubmit()`);
-      await waitFor(`document.querySelector('#login').hidden || !!document.querySelector('.join-screen') || /สิทธิ์|ไม่ถูกต้อง/.test(document.querySelector('#loginState').textContent)`);
+      await waitFor(`document.querySelector('#login').hidden || /สิทธิ์|ไม่ถูกต้อง/.test(document.querySelector('#loginState').textContent)`);
+      await sleep(400);
     };
-    const join = async (key, name) => {
-      await ev(`{ const f = document.querySelector('#joinForm'); f.key.value = ${JSON.stringify(key)}; f.name.value = ${JSON.stringify(name)}; f.requestSubmit(); }`);
-      await waitFor(`!document.querySelector('.join-screen') || /ไม่ถูกต้อง/.test(document.querySelector('#joinState').textContent)`);
-    };
-    // Someone who is not a member is asked for a team key; a wrong key is refused.
+    const profileForm = async (id, fill) => { await ev(`{ const f = document.querySelector('#tab-profile #${id}'); ${fill}; f.requestSubmit(); }`); await sleep(500); };
+    // Someone not yet in a team comes in and lands on ตั้งค่าส่วนตัว with their user code; nothing else to see yet.
     await login('stranger@test.local', PASSWORD);
-    assert.equal(await ev(`!!document.querySelector('.join-screen')`), true);
-    assert.equal(await ev(`!!document.querySelector('.join-screen [data-skip]')`), false, 'non-members cannot skip');
-    await join('WRONG-KEY', 'คนแปลกหน้า');
-    assert.match(await ev(`document.querySelector('#joinState').textContent`), /รหัสทีมไม่ถูกต้อง/);
-    await ev(`document.querySelector('.join-screen [data-logout]').click()`);
-    await sleep(300);
-    // A member without a team joins with the key (any letter case) and starts working.
+    assert.equal(await ev(`document.querySelector('#login').hidden`), true, 'signed in without a team');
+    assert.ok(await waitFor(`document.querySelector('#tab-profile').classList.contains('on') && /^U\\d{3}-/.test(document.querySelector('#myCode')?.textContent || '')`), 'code in ตั้งค่าส่วนตัว');
+    assert.equal(await ev(`document.querySelector('#tabs button[data-tab=status]').offsetParent`), null, 'no data pages before joining');
+    assert.match(await ev(`document.querySelector('#tab-profile .notice').textContent`), /ยังไม่ได้อยู่ในทีม/);
+    await profileForm('joinForm', `f.key.value = 'WRONG-KEY'`);
+    assert.match(await ev(`document.querySelector('#toast').textContent`), /รหัสทีมไม่ถูกต้อง/);
+    await ev(`document.querySelector('#tab-profile [data-act=sign-out]').click()`);
+    await waitFor(`document.querySelector('#confirmBox').open`); await ev(`document.querySelector('#confirmBox button[value=yes]').click()`);
+    assert.ok(await waitFor(`!document.querySelector('#login').hidden`));
+    // A member without a team names themselves and joins with a team key (any letter case); the page reloads into the team.
     await login('editor@test.local', PASSWORD);
-    assert.equal(await ev(`!!document.querySelector('.join-screen [data-skip]')`), true);
-    await join('abcd-1234', 'ช่างเอ');
-    assert.ok(await waitFor(`document.querySelector('#login').hidden && !document.querySelector('.join-screen')`), await ev(`document.querySelector('#loginState').textContent`));
+    assert.ok(await waitFor(`document.querySelector('#tab-profile').classList.contains('on')`));
+    await profileForm('nameForm', `f.name.value = 'ช่างเอ'`);
+    assert.equal(fake.info.get('editor@test.local')?.display_name ?? fake.codes.get('editor@test.local').name, 'ช่างเอ');
+    await profileForm('joinForm', `f.key.value = 'abcd-1234'`);
+    for (let i = 0; i < 40 && fake.info.get('editor@test.local')?.team_id !== 'T1'; i++) await sleep(150);
+    await sleep(1500); await p.waitReady(); await sleep(1500);
+    assert.ok(await waitFor(`document.querySelector('#login').hidden && document.body.classList.contains('teams')`, 10000), 'reloaded into the team');
     assert.equal(fake.info.get('editor@test.local').team_id, 'T1');
     assert.equal(fake.info.get('editor@test.local').display_name, 'ช่างเอ');
     assert.match(await ev(`document.querySelector('#userChip').textContent`), /editor@test\.local/);

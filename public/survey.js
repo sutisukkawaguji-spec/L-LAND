@@ -22,65 +22,6 @@ const initialsOf = name => { const s = String(name || '?').trim(); return /^[เ
 const distM = (a, b) => { const k = Math.PI / 180, x = (b.lon - a.lon) * k * Math.cos((a.lat + b.lat) / 2 * k), y = (b.lat - a.lat) * k; return Math.hypot(x, y) * 6371000; };
 const store = { get: k => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch { /* blocked */ } } };
 
-// ---------- waiting to be added to a team ----------
-// Shown after sign-in to people without a team: their personal user code, to give the admin or the team
-// lead, who adds them with it. The page goes on by itself once they are in a team. A team key works too.
-// Resolves with the member row, null (skipped) or 'logout'.
-export function waitForTeam({ cloud, email, canSkip, esc, every = 5000 }) {
-  return new Promise(resolve => {
-    const box = Object.assign(document.createElement('div'), { className: 'join-screen' });
-    const name0 = store.get('llan.joinName') || '';
-    box.innerHTML = `<div class="join-box">
-      <img src="icon.svg" alt=""><h2>รหัสผู้ใช้ของคุณ</h2>
-      <p class="muted">ส่งรหัสนี้ให้ผู้ดูแลหรือหัวหน้าทีม เพื่อเพิ่มคุณเข้าทีมสำรวจ เมื่อได้รับการเพิ่มแล้ว หน้านี้จะเข้าใช้งานให้เอง</p>
-      <div class="my-code"><b id="myCode">กำลังสร้างรหัส…</b><button type="button" class="small" data-copy-code>คัดลอก</button></div>
-      <label>ชื่อที่แสดงให้ทีมเห็น<input id="myName" placeholder="เช่น สมชาย (ช่างสำรวจ)" value="${esc(name0)}"></label>
-      <p class="muted">${esc(email)}</p>
-      <button type="button" class="primary big" data-check>ตรวจสอบว่าเข้าทีมแล้วหรือยัง</button>
-      <div class="state" id="joinState"></div>
-      <details class="team-key"><summary>มีรหัสทีมจากหัวหน้าทีม? เข้าร่วมด้วยรหัสทีม</summary>
-        <form id="joinForm"><input name="key" required autocomplete="off" value="${esc(store.get('llan.joinKey') || '')}" placeholder="รหัสทีม เช่น A1B2-C3D4" style="text-transform:uppercase">
-        <input name="name" type="hidden"><button class="primary">เข้าร่วมทีม</button></form></details>
-      <div class="row end">${canSkip ? '<button type="button" class="link" data-skip>ข้ามไปก่อน</button>' : ''}<button type="button" class="link" data-logout>ออกจากระบบ</button></div>
-    </div>`;
-    document.body.append(box);
-    const st = box.querySelector('#joinState'), nameIn = box.querySelector('#myName');
-    let timer = null, closed = false;
-    const finish = v => { if (closed) return; closed = true; clearInterval(timer); box.remove(); resolve(v); };
-    const showCode = async () => {
-      try { box.querySelector('#myCode').textContent = await cloud.rpc('llan_my_code', { p_name: nameIn.value.trim() }); }
-      catch (err) { box.querySelector('#myCode').textContent = '-'; st.textContent = err.message; }
-    };
-    const check = async (say = false) => {
-      try {
-        const m = await cloud.me(email);
-        if (m.role && m.team_id) return finish(m);
-        if (say) st.textContent = 'ยังไม่ได้อยู่ในทีม ส่งรหัสให้ผู้ดูแลหรือหัวหน้าทีม';
-      } catch (err) { if (say) st.textContent = err.message; }
-    };
-    showCode();
-    timer = setInterval(() => check(), every);
-    nameIn.addEventListener('change', () => { store.set('llan.joinName', nameIn.value.trim()); showCode(); });
-    box.querySelector('[data-check]').addEventListener('click', () => check(true));
-    box.querySelector('[data-copy-code]').addEventListener('click', () => {
-      const code = box.querySelector('#myCode').textContent;
-      navigator.clipboard?.writeText(code).then(() => { st.textContent = `คัดลอก ${code} แล้ว`; }, () => {});
-    });
-    const form = box.querySelector('#joinForm');
-    form.addEventListener('submit', async e => {
-      e.preventDefault();
-      st.textContent = 'กำลังเข้าร่วมทีม…';
-      try {
-        const [r] = await cloud.rpc('llan_join_team', { p_key: form.key.value.trim(), p_name: nameIn.value.trim() || form.name.value.trim() });
-        store.set('llan.joinKey', null);
-        finish(r || {});
-      } catch (err) { st.textContent = err.message; }
-    });
-    box.querySelector('[data-skip]')?.addEventListener('click', () => finish(null));
-    box.querySelector('[data-logout]').addEventListener('click', () => finish('logout'));
-  });
-}
-
 // office: the office machine (monitoring centre): sees everything as an admin, shares no position.
 export async function createSurvey({ cloud, email, me, ui, office = false }) {
   const { S, map, esc, toast, guard, confirmBox, $ } = ui;
@@ -186,7 +127,7 @@ export async function createSurvey({ cloud, email, me, ui, office = false }) {
 
   // ---------- my position, shared with the team ----------
   function startSharing() {
-    if (office || !T.on || T.watch != null || !('geolocation' in navigator) || !window.isSecureContext) return;
+    if (office || !T.on || !T.me.team_id || T.watch != null || !('geolocation' in navigator) || !window.isSecureContext) return;
     T.watch = navigator.geolocation.watchPosition(p => {
       T.pos = { lat: p.coords.latitude, lon: p.coords.longitude, accuracy: p.coords.accuracy, heading: p.coords.heading, speed: p.coords.speed };
       T.posError = null; sendPos();
@@ -226,10 +167,10 @@ export async function createSurvey({ cloud, email, me, ui, office = false }) {
       return;
     }
     const team = teamOf(T.me.team_id), tt = todayTarget();
-    box.innerHTML = `${team ? `<span class="chip team" style="--c:${team.color}"><i></i>${esc(team.name)}${T.me.team_role === 'lead' ? ' · หัวหน้าทีม' : ''}</span>` : isAdmin() ? '<span class="chip">ผู้ดูแลระบบ</span>' : '<button class="chip warn" data-chip="join">ยังไม่มีทีม · เข้าร่วมทีม</button>'}
+    box.innerHTML = `${team ? `<span class="chip team" style="--c:${team.color}"><i></i>${esc(team.name)}${T.me.team_role === 'lead' ? ' · หัวหน้าทีม' : ''}</span>` : isAdmin() ? '<span class="chip">ผู้ดูแลระบบ</span>' : '<button class="chip warn" data-chip="profile">ยังไม่มีทีม · ดูรหัสผู้ใช้ของฉัน</button>'}
       ${tt.due ? `<button class="chip today" data-chip="mywork" title="งานที่ถึงกำหนดวันนี้ (รวมที่ค้าง)">วันนี้ <b>${tt.done}/${tt.due}</b></button>` : ''}
-      <button class="chip share ${T.sharing && !T.posError && T.sent ? 'on' : ''}" data-chip="share" title="${esc(T.posError || (T.sharing ? 'ส่งตำแหน่งให้หัวหน้าทีมเห็น แตะเพื่อหยุด' : 'ไม่ได้แชร์ตำแหน่ง แตะเพื่อเปิด'))}">
-        <i></i>${T.sharing ? (T.posError ? 'ตำแหน่ง: ' + esc(T.posError) : T.sent ? 'แชร์ตำแหน่ง' : 'กำลังหาตำแหน่ง') : 'ไม่แชร์ตำแหน่ง'}</button>`;
+      ${team ? `<button class="chip share ${T.sharing && !T.posError && T.sent ? 'on' : ''}" data-chip="share" title="${esc(T.posError || (T.sharing ? 'ส่งตำแหน่งให้หัวหน้าทีมเห็น แตะเพื่อหยุด' : 'ไม่ได้แชร์ตำแหน่ง แตะเพื่อเปิด'))}">
+        <i></i>${T.sharing ? (T.posError ? 'ตำแหน่ง: ' + esc(T.posError) : T.sent ? 'แชร์ตำแหน่ง' : 'กำลังหาตำแหน่ง') : 'ไม่แชร์ตำแหน่ง'}</button>` : ''}`;
   }
   document.addEventListener('click', e => {
     const c = e.target.closest('[data-chip]');
@@ -240,10 +181,7 @@ export async function createSurvey({ cloud, email, me, ui, office = false }) {
     })();
     if (c.dataset.chip === 'mywork') ui.goTab('mywork');
     if (c.dataset.chip === 'team') ui.goTab('team');
-    if (c.dataset.chip === 'join') guard(async () => {
-      const r = await waitForTeam({ cloud, email, canSkip: true, esc });
-      if (r && r !== 'logout') { await load(); chips(); toast(`เข้าทีม${teamName(r.team_id) || r.team_name || ''}แล้ว`); ui.refreshMap(); }
-    })();
+    if (c.dataset.chip === 'profile') ui.goTab('profile');
   });
 
   // ---------- pages ----------
@@ -484,6 +422,62 @@ export async function createSurvey({ cloud, email, me, ui, office = false }) {
       </div>`);
   }
 
+  // ตั้งค่าส่วนตัว: my code for the team lead, my name, my team, position sharing, password, sign out.
+  const ROLE_TH = { viewer: 'ดูอย่างเดียว', editor: 'แก้ไขได้', admin: 'ผู้ดูแลระบบ' };
+  async function renderProfile() {
+    if (T.on && !T.profile) T.profile = (await cloud.rpc('llan_my_profile').catch(() => []))[0] || null;
+    const code = T.profile?.code || '', team = teamOf(T.me.team_id);
+    const name = T.me.display_name || T.profile?.name || store.get('llan.joinName') || '';
+    const waiting = T.on && !T.me.team_id && !isAdmin();
+    page('profile', `
+      <div class="page-head"><div><h2>ตั้งค่าส่วนตัว</h2><p class="muted">${esc(email)}</p></div></div>
+      ${waiting ? `<div class="notice"><b>ยังไม่ได้อยู่ในทีม</b> ส่ง<b>รหัสผู้ใช้</b>ด้านล่างให้หัวหน้าทีมหรือผู้ดูแล เพื่อเพิ่มคุณเข้าทีม
+        เมื่อได้รับการเพิ่มแล้ว หน้าเว็บจะโหลดใหม่ให้เอง แล้วจะเห็นสถานะแปลง งานของทีม และงานของคุณ</div>` : ''}
+      <div class="cols2">
+        <div class="panel profile-card">
+          <div class="who"><span class="avatar lg" style="background:${team?.color || '#1f6f5c'}">${esc(initialsOf(name || email))}</span>
+            <div><b>${esc(name || 'ยังไม่ได้ตั้งชื่อ')}</b><br><span class="muted">${T.me.role ? esc(ROLE_TH[T.me.role] || T.me.role) : 'ยังไม่ได้รับสิทธิ์'}${team ? ` · ${esc(team.name)}${T.me.team_role === 'lead' ? ' (หัวหน้าทีม)' : ''}` : ''}</span></div></div>
+          ${T.on ? `<h3>รหัสผู้ใช้ของฉัน</h3>
+          <div class="my-code"><b id="myCode">${esc(code || '-')}</b><button class="small" data-copy="${esc(code)}">คัดลอก</button>${navigator.share ? '<button class="small" data-act="share-code">ส่งต่อ</button>' : ''}</div>
+          <p class="muted">หัวหน้าทีมหรือผู้ดูแลใส่รหัสนี้ที่หน้า "ทีม" → "เพิ่มสมาชิกด้วยรหัสผู้ใช้" รหัสนี้ใช้เพิ่มคุณเข้าทีมเท่านั้น ไม่ใช่รหัสผ่าน</p>` : ''}
+          <form id="nameForm" class="stack"><label>ชื่อที่แสดงให้ทีมเห็น<input name="name" value="${esc(name)}" placeholder="เช่น สมชาย (ช่างสำรวจ)" required></label>
+            <button class="primary">บันทึกชื่อ</button></form>
+        </div>
+        <div class="panel">
+          <h3>ทีมของฉัน</h3>
+          ${team ? `<p><span class="team-dot" style="--c:${team.color};background:${team.color}"></span> <b>${esc(team.name)}</b> · ${T.me.team_role === 'lead' ? 'หัวหน้าทีม' : 'ลูกทีม'}</p>`
+            : `<p class="muted">${isAdmin() ? 'ผู้ดูแลระบบไม่ต้องอยู่ในทีม' : 'ยังไม่มีทีม'}</p>`}
+          ${T.on && !team ? `<details class="team-key"><summary>มีรหัสทีมจากหัวหน้าทีม? เข้าร่วมด้วยรหัสทีม</summary>
+            <form id="joinForm" class="row"><input name="key" required autocomplete="off" placeholder="รหัสทีม เช่น A1B2-C3D4" style="text-transform:uppercase"><button class="primary">เข้าร่วมทีม</button></form></details>` : ''}
+          ${team ? `<h3>ตำแหน่งของฉัน</h3><p class="muted">ส่งตำแหน่งให้หัวหน้าทีมเห็นขณะเปิดหน้าเว็บ</p>
+            <button class="${T.sharing ? '' : 'primary'}" data-chip="share">${T.sharing ? 'หยุดแชร์ตำแหน่ง' : 'แชร์ตำแหน่ง'}</button>` : ''}
+          <h3>เปลี่ยนรหัสผ่าน</h3>
+          <form id="pwForm" class="row"><input name="pw" type="password" minlength="6" placeholder="รหัสผ่านใหม่ (อย่างน้อย 6 ตัว)" autocomplete="new-password" required><button>เปลี่ยนรหัสผ่าน</button></form>
+          <h3>ออกจากระบบ</h3><button class="danger" data-act="sign-out">ออกจากระบบ</button>
+        </div>
+      </div>`);
+  }
+  document.addEventListener('submit', e => {
+    const f = e.target;
+    if (!['nameForm', 'joinForm', 'pwForm'].includes(f.id) || !f.closest('#tab-profile')) return;
+    e.preventDefault();
+    guard(async () => {
+      if (f.id === 'nameForm') {
+        const n = f.name.value.trim();
+        store.set('llan.joinName', n);
+        if (T.on) await cloud.rpc('llan_set_my_name', { p_name: n });
+        T.me.display_name = n; T.profile = { ...(T.profile || {}), name: n };
+        await load(); renderProfile(); return toast('บันทึกชื่อแล้ว');
+      }
+      if (f.id === 'joinForm') {
+        await cloud.rpc('llan_join_team', { p_key: f.key.value.trim(), p_name: T.me.display_name || T.profile?.name || store.get('llan.joinName') || '' });
+        toast('เข้าร่วมทีมแล้ว กำลังโหลดข้อมูลของทีม…');
+        return setTimeout(() => location.reload(), 600);
+      }
+      if (f.id === 'pwForm') { await ui.changePassword(f.pw.value); f.reset(); return toast('เปลี่ยนรหัสผ่านแล้ว'); }
+    })();
+  });
+
   // ---------- page events ----------
   document.addEventListener('click', e => {
     const el = e.target.closest('[data-go],[data-act],[data-seg] button,[data-day],[data-person],[data-copy],[data-fill-code],[data-newkey],[data-locate],[data-plan-map],[data-plan-del],[data-team-edit],[data-team-del]');
@@ -527,6 +521,8 @@ export async function createSurvey({ cloud, email, me, ui, office = false }) {
         await cloud.rpc('llan_team_delete', { p_id: tm.id }); await load(); ui.refreshMap(); return renderTeam();
       }
       const act = el.dataset.act;
+      if (act === 'share-code') { const code = T.profile?.code; if (code) await navigator.share({ title: 'รหัสผู้ใช้ L-LAN', text: `รหัสผู้ใช้ L-LAN ของ ${T.me.display_name || T.profile?.name || email}: ${code}` }).catch(() => {}); }
+      if (act === 'sign-out') { if (await confirmBox('ออกจากระบบ?')) ui.signOut(); }
       if (act === 'mywork-map') { ui.setColor('assign'); ui.goTab('map'); ui.fitCodes(new Set(mine().map(a => a.code))); }
       if (act === 'people-map') { T.showPeople = true; ui.goTab('map'); ui.updateMarkers(); ui.fitPeople(T.locations); }
       if (act === 'sum-xlsx') await summaryXlsx();
@@ -600,7 +596,8 @@ export async function createSurvey({ cloud, email, me, ui, office = false }) {
     get on() { return T.on; }, get me() { return T.me; }, isLead, isAdmin, office,
     lockOf, assignInfo, logWork, styleOf, markers, onMarker, chips,
     lockForCodes: codes => codes.map(lockOf).find(Boolean) || null,
-    render: { mywork: renderMyWork, team: renderTeam, summary: renderSummary, plan: renderPlan },
+    render: { mywork: renderMyWork, team: renderTeam, summary: renderSummary, plan: renderPlan, profile: renderProfile },
+    get inTeam() { return !!T.me.team_id; },
     start() {
       chips();
       if (!T.on) return;
@@ -609,6 +606,11 @@ export async function createSurvey({ cloud, email, me, ui, office = false }) {
       T.timers.push(setInterval(() => { if (!document.hidden) loadLocations(); }, 20000));
       T.timers.push(setInterval(() => { if (!document.hidden) { if (T.pos && T.sent && Date.now() - T.sent.at > 60000) sendPos(true); load().then(() => { chips(); ui.updateMarkers(); }).catch(() => {}); } }, 60000));
       loadMineToday().then(chips);
+      // Not in a team yet: look every few seconds; once a lead adds this person, reload with the team's data.
+      if (!office && !T.me.team_id && !isAdmin()) T.timers.push(setInterval(async () => {
+        const m = await cloud.me(email).catch(() => null);
+        if (m?.team_id) { toast(`ได้รับการเพิ่มเข้า${teamName(m.team_id) || 'ทีม'}แล้ว กำลังโหลดงานของทีม…`); setTimeout(() => location.reload(), 900); }
+      }, ui.teamPoll || 6000));
     },
     async refresh() { await load(); chips(); },
     stop() {

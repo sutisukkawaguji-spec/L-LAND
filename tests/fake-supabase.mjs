@@ -50,7 +50,11 @@ export function fakeSupabase(members = { 'admin@test.local': 'admin', 'editor@te
       return body.password === PASSWORD ? send(200, { access_token: `tok:${body.email}`, refresh_token: `ref:${body.email}`, expires_in: 3600, user: { email: body.email } })
         : send(400, { error_description: 'Invalid login credentials' });
     }
-    if (url.pathname === '/auth/v1/user') return bearer.startsWith('tok:') ? send(200, { email: bearer.slice(4) }) : send(401, { msg: 'bad jwt' });
+    if (url.pathname === '/auth/v1/user') {
+      if (!bearer.startsWith('tok:')) return send(401, { msg: 'bad jwt' });
+      if (req.method === 'PUT') { if (String(body?.password || '').length < 6) return send(422, { msg: 'Password should be at least 6 characters.' }); state.passwords = { ...(state.passwords || {}), [bearer.slice(4)]: body.password }; }
+      return send(200, { email: bearer.slice(4) });
+    }
 
     const email = !service && bearer.startsWith('tok:') ? bearer.slice(4) : null;
     const role = service ? 'service' : email ? members[email] || null : null;
@@ -100,7 +104,7 @@ export function fakeSupabase(members = { 'admin@test.local': 'admin', 'editor@te
     const myTeam = email ? info.get(email)?.team_id || null : null;
     const isLead = team => service || role === 'admin' || (!!team && myTeam === team && info.get(email)?.team_role === 'lead');
     const TEAM_TABLES = ['llan_teams', 'llan_locations', 'llan_work_log', 'llan_plans', 'llan_assignments'];
-    if (!teams && (TEAM_TABLES.includes(name) || name.startsWith('rpc/llan_team') || ['rpc/llan_join_team', 'rpc/llan_member_set', 'rpc/llan_my_code', 'rpc/llan_add_by_code', 'rpc/llan_pending_users'].includes(name)))
+    if (!teams && (TEAM_TABLES.includes(name) || name.startsWith('rpc/llan_team') || ['rpc/llan_join_team', 'rpc/llan_member_set', 'rpc/llan_my_code', 'rpc/llan_add_by_code', 'rpc/llan_pending_users', 'rpc/llan_my_profile', 'rpc/llan_set_my_name'].includes(name)))
       return send(404, { code: 'PGRST205', message: `Could not find the table 'public.${name}' in the schema cache` });
     const raise = (code, message) => send(400, { code, message });
     // The office (secret key) manages members directly.
@@ -143,6 +147,16 @@ export function fakeSupabase(members = { 'admin@test.local': 'admin', 'editor@te
       if (!codes.has(email)) codes.set(email, { email, code: `U${String(codes.size + 1).padStart(3, '0')}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`, name: String(body.p_name || '').trim() || null, created_at: now() });
       else if (String(body.p_name || '').trim()) codes.get(email).name = String(body.p_name).trim();
       return send(200, codes.get(email).code);
+    }
+    if (name === 'rpc/llan_my_profile' || name === 'rpc/llan_set_my_name') {
+      if (!email) return raise('P0001', 'กรุณาเข้าสู่ระบบก่อน');
+      if (!codes.has(email)) codes.set(email, { email, code: `U${String(codes.size + 1).padStart(3, '0')}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`, name: null, created_at: now() });
+      const n = String(body?.p_name || '').trim();
+      if (name === 'rpc/llan_set_my_name') {
+        if (n) { codes.get(email).name = n; if (info.has(email)) info.get(email).display_name = n; }
+        return send(200, null);
+      }
+      return send(200, [{ code: codes.get(email).code, name: info.get(email)?.display_name || codes.get(email).name }]);
     }
     if (name === 'rpc/llan_add_by_code') {
       const hit = [...codes].find(([, c]) => c.code.toUpperCase() === String(body.p_code || '').trim().toUpperCase());

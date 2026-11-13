@@ -150,6 +150,23 @@ begin
     display_name = coalesce(public.llan_members.display_name, excluded.display_name);
   return query select u.email, u.name;
 end $$;
+-- ตั้งค่าส่วนตัว: my own name and code (anyone signed in, member or not yet).
+create or replace function public.llan_my_profile() returns table (code text, name text)
+language plpgsql security definer set search_path = public as $$
+declare me text := public.llan_email();
+begin
+  perform public.llan_my_code(null);
+  return query select c.code, coalesce(m.display_name, c.name) from public.llan_user_codes c
+    left join public.llan_members m on lower(m.email) = me where c.email = me;
+end $$;
+create or replace function public.llan_set_my_name(p_name text) returns void
+language plpgsql security definer set search_path = public as $$
+declare me text := public.llan_email(); n text := nullif(trim(p_name), '');
+begin
+  if me is null then raise exception 'กรุณาเข้าสู่ระบบก่อน'; end if;
+  perform public.llan_my_code(n);
+  update public.llan_members set display_name = coalesce(n, display_name) where lower(email) = me;
+end $$;
 -- People who have a code but no team yet (admins only).
 create or replace function public.llan_pending_users() returns table (email text, code text, name text, created_at timestamptz)
 language sql stable security definer set search_path = public as $$

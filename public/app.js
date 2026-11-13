@@ -37,6 +37,7 @@ async function webApi(method, url, body) {
   const hit = WEBAUTH.dispatch(method, new URL(url, location.href));
   if (!hit.found) throw new Error('ส่วนนี้ใช้ได้ที่เครื่องสำนักงานเท่านั้น');
   if (method !== 'GET' && WEBAUTH.role === 'viewer') throw new Error('บัญชีนี้ดูข้อมูลได้อย่างเดียว');
+  if (method !== 'GET' && !WEBAUTH.role) throw new Error('ยังไม่ได้อยู่ในทีม: ไปที่ "ตั้งค่าส่วนตัว" แล้วส่งรหัสผู้ใช้ให้หัวหน้าทีมหรือผู้ดูแล');
   // Copies, like a server would send: the page never edits the store's own objects.
   return structuredClone((await hit.run(body ? structuredClone(body) : null)) ?? null);
 }
@@ -1397,6 +1398,7 @@ const NAV_ICON = {
   changes: '<path d="M4 20h4l11-11-4-4L4 16Z"/><path d="M13.5 6.5l4 4"/>',
   data: '<path d="M12 3v12M7 10l5 5 5-5M4 21h16"/>',
   more: '<circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/>',
+  profile: '<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8"/>',
 };
 const SB = () => String(CONFIG?.url || '').replace(/\/$/, '');
 const wsave = v => { try { v ? localStorage.setItem('llan.full.session', JSON.stringify(v)) : localStorage.removeItem('llan.full.session'); } catch { /* blocked */ } };
@@ -1432,23 +1434,19 @@ function showWebSession() {
   const s = S.session;
   $('#login').hidden = !!s.user;
   const ROLE = { viewer: 'ดูอย่างเดียว', editor: 'แก้ไขได้', admin: 'ผู้ดูแล' };
-  $('#userChip').innerHTML = s.user ? esc(s.user.email) + '<br><span style="opacity:.8">' + (ROLE[s.user.role] || '') + ' · ข้อมูลออนไลน์</span><button id="logout">ออกจากระบบ</button>' : '';
+  $('#userChip').innerHTML = s.user ? `<button class="me-link" id="meLink" title="ตั้งค่าส่วนตัว">${esc(s.user.email)}</button><br><span style="opacity:.8">${s.user.role ? ROLE[s.user.role] || '' : 'ยังไม่ได้อยู่ในทีม'} · ข้อมูลออนไลน์</span><button id="logout">ออกจากระบบ</button>` : '';
+  $('#meLink')?.addEventListener('click', () => goTab('profile'));
   $('#logout')?.addEventListener('click', guard(async () => { if (await confirmBox('ออกจากระบบ?')) webSignOut(); }));
 }
 async function webOpen() {
   const [{ Cloud }, { CloudStore }, { coreRoutes, router }, surveyMod] = await Promise.all([import('./lib/cloud.mjs'), import('./lib/cloud-store.mjs'), import('./lib/core-api.mjs'), import('./survey.js')]);
   const cloud = new Cloud({ url: SB(), key: CONFIG.key, token: webToken });
   const email = WEBAUTH.session.email;
-  // Survey teams: people without a team join with the key from their team lead.
-  let me = await cloud.me(email);
-  if (me.teams && (!me.role || (!me.team_id && me.role !== 'admin'))) {
-    $('#loginState').textContent = '';
-    const joined = await surveyMod.waitForTeam({ cloud, email, canSkip: !!me.role, esc });
-    if (joined === 'logout') return webSignOut();
-    if (joined) me = await cloud.me(email);
-  }
+  // Survey teams: someone not yet in a team still comes in, finds their user code in ตั้งค่าส่วนตัว and gives
+  // it to the team lead or admin; the page reloads by itself once they are added and then shows the data.
+  const me = await cloud.me(email);
   const role = me.role;
-  if (!role) throw new Error('บัญชีนี้ยังไม่ได้รับสิทธิ์ใช้งาน: ใส่รหัสทีมจากหัวหน้าทีม หรือให้ผู้ดูแลเพิ่มอีเมลใน llan_members');
+  if (!role && !me.teams) throw new Error('บัญชีนี้ยังไม่ได้รับสิทธิ์ใช้งาน (ให้ผู้ดูแลเพิ่มอีเมลใน llan_members)');
   $('#loginState').textContent = 'กำลังโหลดข้อมูล…';
   const store = await new CloudStore(cloud, { email }).open();
   const survey = await surveyMod.createSurvey({ cloud, email, me, ui: surveyUi() });
@@ -1456,14 +1454,16 @@ async function webOpen() {
     statuses: () => ({ rows: store.list('statuses'), checkedAt: store.statusCheckedAt }),
     ...(survey.on ? { team: () => survey.me.team_id || null, locked: code => survey.lockOf(code), onWork: ev => survey.logWork(ev) } : {}) })) });
   document.body.classList.toggle('viewer', role === 'viewer');
+  document.body.classList.toggle('guest', !role);
   document.body.classList.toggle('lead', survey.on && survey.isLead());
-  document.body.classList.toggle('teams', survey.on);
+  document.body.classList.toggle('teams', survey.on && !!role);
   S.session = { mode: 'web', user: { email, role } };
   showSession();
   // Surveyors start on their own work, colour by the work given out.
   if (survey.on && !refreshMap.fitted) $('#mapColor').value = 'assign';
   await reloadAll();
   survey.start();
+  if (!role || (survey.on && !survey.inTeam && role !== 'admin')) goTab('profile');
   clearInterval(webOpen.timer);
   webOpen.timer = setInterval(() => webRefresh().catch(err => console.warn(err)), 30000);
 }
@@ -1541,7 +1541,13 @@ function surveyUi() {
       map.res = Math.max(1, Math.max(...xs.map(p => Math.abs(p[0] - map.center[0])), ...xs.map(p => Math.abs(p[1] - map.center[1]))) * 2.6 / Math.min(map.w, map.h));
       map.draw();
     },
-    preview: (rows, style) => { PREVIEW = rows ? { rows, style } : null; if (rows) $('#mapColor').value = 'assign'; refreshMap(); } };
+    preview: (rows, style) => { PREVIEW = rows ? { rows, style } : null; if (rows) $('#mapColor').value = 'assign'; refreshMap(); },
+    signOut: () => webSignOut(),
+    changePassword: async pw => {
+      const res = await fetch(SB() + '/auth/v1/user', { method: 'PUT', headers: { apikey: CONFIG.key, Authorization: `Bearer ${await webToken()}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pw }) });
+      if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(/least|short/i.test(d.msg || d.error_description || '') ? 'รหัสผ่านต้องยาวอย่างน้อย 6 ตัว' : d.msg || d.error_description || 'เปลี่ยนรหัสผ่านไม่ได้'); }
+    },
+    teamPoll: Number(window.LLAN_TEAM_POLL) || 6000 };
 }
 // The office machine is the monitoring centre of the survey teams: every team and every surveyor,
 // through the office server (which reaches Supabase with the secret key).

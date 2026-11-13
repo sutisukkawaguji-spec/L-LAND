@@ -136,19 +136,23 @@ test('survey teams: plan, my work, positions, locks, team admin', { skip: !findC
     assert.ok(await waitFor(`!!document.querySelector('#tab-summary .kpis')`));
     assert.match(await text('#tab-summary .kpis'), /ตามแผนงาน\s*0\/8/);
 
-    // 6. A newcomer gets a personal code; the admin adds them with it and their page opens by itself.
-    await ev(`localStorage.removeItem('llan.full.session')`); await p.goto(`${web}/`); await sleep(500);
-    await ev(`document.querySelector('#wEmail').value = 'newbie@test.local'; document.querySelector('#wPass').value = ${JSON.stringify(PASSWORD)}; document.querySelector('#webLogin').requestSubmit()`);
-    assert.ok(await waitFor(`/^U\\d{3}-/.test(document.querySelector('#myCode')?.textContent || '')`), 'personal code shown');
-    assert.equal(await ev(`!!document.querySelector('.join-screen [data-skip]')`), false, 'no skipping without membership');
-    await ev(`{ const n = document.querySelector('#myName'); n.value = 'น้องใหม่'; n.dispatchEvent(new Event('change')); }`);
-    await sleep(500);
+    // 6. A newcomer signs in, finds their user code in ตั้งค่าส่วนตัว; the admin adds them with it and the page
+    //    reloads by itself into the team.
+    await ev(`localStorage.removeItem('llan.full.session'); window.LLAN_TEAM_POLL = 1000`); await p.goto(`${web}/`); await sleep(500);
+    await ev(`window.LLAN_TEAM_POLL = 1000; document.querySelector('#wEmail').value = 'newbie@test.local'; document.querySelector('#wPass').value = ${JSON.stringify(PASSWORD)}; document.querySelector('#webLogin').requestSubmit()`);
+    assert.ok(await waitFor(`document.querySelector('#tab-profile').classList.contains('on') && /^U\\d{3}-/.test(document.querySelector('#myCode')?.textContent || '')`), 'personal code in ตั้งค่าส่วนตัว');
+    assert.equal(await ev(`document.body.classList.contains('guest')`), true);
+    assert.match(await text('#surveyChips'), /ยังไม่มีทีม/);
+    await ev(`{ const f = document.querySelector('#tab-profile #nameForm'); f.name.value = 'น้องใหม่'; f.requestSubmit(); }`);
+    for (let i = 0; i < 30 && fake.codes.get('newbie@test.local')?.name !== 'น้องใหม่'; i++) await sleep(150);
     const code = await ev(`document.querySelector('#myCode').textContent`);
     assert.equal(fake.codes.get('newbie@test.local').name, 'น้องใหม่');
+    await assert.rejects(new Cloud({ url: sb, key: PUBLISHABLE, token: 'tok:newbie@test.local' }).saveRecords([{ entity: 'lands', id: 'L0', patch: { docNo: 'x' }, unset: [] }], 'newbie@test.local'), /ไม่มีสิทธิ์/, 'no data rights before joining');
     const admin = new Cloud({ url: sb, key: PUBLISHABLE, token: 'tok:admin@test.local' });
     await admin.rpc('llan_add_by_code', { p_code: code.toLowerCase(), p_team_id: 'T2', p_team_role: 'member', p_role: 'editor' });
-    assert.ok(await waitFor(`document.querySelector('#login').hidden && !document.querySelector('.join-screen')`, 15000), 'page opened once added');
-    assert.ok(await waitFor(`/ทีมใต้/.test(document.querySelector('#surveyChips').innerText)`));
+    await sleep(2500); await p.waitReady().catch(() => {});
+    assert.ok(await waitFor(`document.querySelector('#login').hidden && document.body.classList.contains('teams') && /ทีมใต้/.test(document.querySelector('#surveyChips').innerText)`, 15000), 'reloaded into the team');
+    assert.equal(await ev(`document.body.classList.contains('guest')`), false);
     assert.equal(fake.info.get('newbie@test.local').display_name, 'น้องใหม่');
     // A lead may add only to their own team; the admin adds from the pending list on the team page.
     const lead = new Cloud({ url: sb, key: PUBLISHABLE, token: 'tok:lead@test.local' });
