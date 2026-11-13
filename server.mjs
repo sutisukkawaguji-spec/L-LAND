@@ -15,6 +15,7 @@ import { Cloud } from './lib/cloud.mjs';
 import { CloudSync } from './lib/cloud-sync.mjs';
 import { coreRoutes, router, computeStatuses } from './lib/core-api.mjs';
 import { StatusPublisher } from './lib/status-publisher.mjs';
+import { officeTeam } from './lib/team-office.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DATA = process.env.LLAN_DATA_DIR || path.join(ROOT, 'data');
@@ -121,6 +122,10 @@ route('GET', '/api/cloud/status', async () => {
   try { return { ...(await c.status()), local: store.list('features').length, sync: sync.status() }; }
   catch (err) { return { ok: false, message: err.message, sync: sync.status() }; }
 });
+// Survey teams: the office page is the monitoring centre (every team, every surveyor), with the secret key.
+const teamCall = officeTeam(() => (cloudCfg().url && cloudCfg().key && isWriteKey(cloudCfg().key) ? new Cloud(cloudCfg()) : null));
+route('POST', '/api/team/call', async (_, body) => ({ result: (await teamCall(body)) ?? null }));
+
 // Field photos live in Supabase Storage; the office reads and adds them with its secret key.
 const photoCloud = () => { needSecret(); return new Cloud(cloudCfg()); };
 const okPhotoPath = p => typeof p === 'string' && /^[a-z]+\/[^/]+\/[\w.-]+\.(jpe?g|png|webp)$/i.test(p) && !p.includes('..');
@@ -205,7 +210,7 @@ sync.on('change', s => broadcast({ type: 'cloud', ...s }));
 async function serveStatic(res, pathname) {
   const rel = pathname === '/' ? 'index.html' : decodeURIComponent(pathname.slice(1));
   // The browser also needs the pure-JS file-format readers.
-  const base = rel.startsWith('lib/') && ['lib/shapefile.mjs', 'lib/cp874.mjs'].includes(rel) ? ROOT : path.join(ROOT, 'public');
+  const base = rel.startsWith('lib/') && ['lib/shapefile.mjs', 'lib/cp874.mjs', 'lib/team.mjs', 'lib/xlsx.mjs'].includes(rel) ? ROOT : path.join(ROOT, 'public');
   const file = path.normalize(path.join(base, rel));
   if (!file.startsWith(base) || !existsSync(file) || !(await stat(file)).isFile()) return fail(res, 404, 'ไม่พบไฟล์');
   send(res, 200, await readFile(file), MIME[path.extname(file)] || 'application/octet-stream');

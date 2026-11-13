@@ -135,6 +135,33 @@ test('survey teams: plan, my work, positions, locks, team admin', { skip: !findC
     await tab('summary');
     assert.ok(await waitFor(`!!document.querySelector('#tab-summary .kpis')`));
     assert.match(await text('#tab-summary .kpis'), /ตามแผนงาน\s*0\/8/);
+
+    // 6. A newcomer gets a personal code; the admin adds them with it and their page opens by itself.
+    await ev(`localStorage.removeItem('llan.full.session')`); await p.goto(`${web}/`); await sleep(500);
+    await ev(`document.querySelector('#wEmail').value = 'newbie@test.local'; document.querySelector('#wPass').value = ${JSON.stringify(PASSWORD)}; document.querySelector('#webLogin').requestSubmit()`);
+    assert.ok(await waitFor(`/^U\\d{3}-/.test(document.querySelector('#myCode')?.textContent || '')`), 'personal code shown');
+    assert.equal(await ev(`!!document.querySelector('.join-screen [data-skip]')`), false, 'no skipping without membership');
+    await ev(`{ const n = document.querySelector('#myName'); n.value = 'น้องใหม่'; n.dispatchEvent(new Event('change')); }`);
+    await sleep(500);
+    const code = await ev(`document.querySelector('#myCode').textContent`);
+    assert.equal(fake.codes.get('newbie@test.local').name, 'น้องใหม่');
+    const admin = new Cloud({ url: sb, key: PUBLISHABLE, token: 'tok:admin@test.local' });
+    await admin.rpc('llan_add_by_code', { p_code: code.toLowerCase(), p_team_id: 'T2', p_team_role: 'member', p_role: 'editor' });
+    assert.ok(await waitFor(`document.querySelector('#login').hidden && !document.querySelector('.join-screen')`, 15000), 'page opened once added');
+    assert.ok(await waitFor(`/ทีมใต้/.test(document.querySelector('#surveyChips').innerText)`));
+    assert.equal(fake.info.get('newbie@test.local').display_name, 'น้องใหม่');
+    // A lead may add only to their own team; the admin adds from the pending list on the team page.
+    const lead = new Cloud({ url: sb, key: PUBLISHABLE, token: 'tok:lead@test.local' });
+    const code2 = await new Cloud({ url: sb, key: PUBLISHABLE, token: 'tok:newbie2@test.local' }).rpc('llan_my_code', { p_name: 'น้องใหม่สอง' });
+    await assert.rejects(lead.rpc('llan_add_by_code', { p_code: code2, p_team_id: 'T2' }), /เฉพาะผู้ดูแล หรือหัวหน้าของทีมนั้น/);
+    await assert.rejects(lead.rpc('llan_add_by_code', { p_code: 'NOPE-0000', p_team_id: 'T1' }), /ไม่พบรหัสผู้ใช้นี้/);
+    await signIn('admin@test.local');
+    await tab('team');
+    assert.ok(await waitFor(`!!document.querySelector('#tab-team [data-fill-code="${code2}"]')`), 'pending list shows the code');
+    await ev(`document.querySelector('#tab-team [data-fill-code="${code2}"]').click()`);
+    await ev(`{ const f = document.querySelector('#addByCode'); f.team.value = 'T1'; f.trole.value = 'lead'; f.requestSubmit(); }`);
+    for (let i = 0; i < 40 && fake.info.get('newbie2@test.local')?.team_id !== 'T1'; i++) await sleep(150);
+    assert.deepEqual([fake.info.get('newbie2@test.local')?.team_id, fake.info.get('newbie2@test.local')?.team_role, fake.members['newbie2@test.local']], ['T1', 'lead', 'editor']);
   } finally {
     child.kill(); site.close(); fake.server.close(); await sleep(400);
     rmSync(dist, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });

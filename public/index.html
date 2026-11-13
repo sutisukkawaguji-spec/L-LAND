@@ -14,9 +14,9 @@
       <button data-tab="map" class="on">แผนที่</button>
       <button data-tab="mywork" class="web-only teams-only">งานของฉัน</button>
       <button data-tab="status">สถานะแปลง <span class="badge" id="badgeFix"></span></button>
-      <button data-tab="team" class="web-only teams-only">ทีม</button>
-      <button data-tab="summary" class="web-only teams-only">สรุปงาน</button>
-      <button data-tab="plan" class="web-only lead-only">แผนงาน</button>
+      <button data-tab="team" class="teams-only">ทีม</button>
+      <button data-tab="summary" class="teams-only">สรุปงาน</button>
+      <button data-tab="plan" class="lead-only">แผนงาน</button>
       <button data-tab="registry">ทะเบียน</button>
       <button data-tab="checks">ตรวจสอบ <span class="badge" id="badgeErrors"></span></button>
       <button data-tab="changes">สรุปการแก้ไข <span class="badge" id="badgePending"></span></button>
@@ -25,7 +25,7 @@
       <button data-tab="settings" class="local-only">ตั้งค่า</button>
       <button class="web-only nav-more" id="navMore" type="button">เพิ่มเติม</button>
     </nav>
-    <div class="survey-chips web-only" id="surveyChips"></div>
+    <div class="survey-chips teams-only" id="surveyChips"></div>
     <button class="job-chip" id="jobChip" hidden onclick="document.querySelector(&quot;#tabs button[data-tab=ltax]&quot;).click()"></button>
     <div class="ltax-chip local-only" id="ltaxChip" title="สถานะการเชื่อมต่อ LTAX ONLINE">LTAX: -</div>
     <div class="user-chip" id="userChip"></div>
@@ -59,7 +59,7 @@
               <select id="mapColor">
                 <option value="status">สถานะแปลง (ระบบกลาง)</option>
                 <option value="survey">ความคืบหน้าการสำรวจ</option>
-                <option value="assign" class="web-only">งานที่มอบหมาย (ทีมสำรวจ)</option>
+                <option value="assign" class="teams-only">งานที่มอบหมาย (ทีมสำรวจ)</option>
                 <option value="link">การเชื่อมต่อข้อมูล</option>
                 <option value="saved">สถานะบันทึกเข้า LTAX</option>
                 <option value="join">การจอยกับทะเบียน</option>
@@ -328,9 +328,9 @@
       <p class="muted" id="dataDir"></p>
     </section>
     <section class="tab web-only" id="tab-mywork"></section>
-    <section class="tab web-only" id="tab-team"></section>
-    <section class="tab web-only" id="tab-summary"></section>
-    <section class="tab web-only" id="tab-plan"></section>
+    <section class="tab" id="tab-team"></section>
+    <section class="tab" id="tab-summary"></section>
+    <section class="tab" id="tab-plan"></section>
   </main>
 
   <dialog id="editor" class="editor"><form method="dialog" id="editorForm"></form></dialog>

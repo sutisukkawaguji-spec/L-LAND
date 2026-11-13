@@ -22,39 +22,67 @@ const initialsOf = name => { const s = String(name || '?').trim(); return /^[เ
 const distM = (a, b) => { const k = Math.PI / 180, x = (b.lon - a.lon) * k * Math.cos((a.lat + b.lat) / 2 * k), y = (b.lat - a.lat) * k; return Math.hypot(x, y) * 6371000; };
 const store = { get: k => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch { /* blocked */ } } };
 
-// ---------- joining a team ----------
-// Shown after sign-in to people without a team. Resolves with the joined team, null (skipped) or 'logout'.
-export function askJoin({ cloud, email, canSkip, esc }) {
+// ---------- waiting to be added to a team ----------
+// Shown after sign-in to people without a team: their personal user code, to give the admin or the team
+// lead, who adds them with it. The page goes on by itself once they are in a team. A team key works too.
+// Resolves with the member row, null (skipped) or 'logout'.
+export function waitForTeam({ cloud, email, canSkip, esc, every = 5000 }) {
   return new Promise(resolve => {
     const box = Object.assign(document.createElement('div'), { className: 'join-screen' });
-    const pending = store.get('llan.joinKey') || '';
-    box.innerHTML = `<form class="join-box" id="joinForm">
-      <img src="icon.svg" alt=""><h2>เข้าร่วมทีมสำรวจ</h2>
-      <p class="muted">ใส่รหัสทีมที่ได้จากหัวหน้าทีม (เช่น A1B2-C3D4) บัญชี ${esc(email)} จะเข้าทีมและเห็นงานของทีมทันที</p>
-      <label>รหัสทีม<input name="key" required autocomplete="off" value="${esc(pending)}" placeholder="XXXX-XXXX" style="text-transform:uppercase"></label>
-      <label>ชื่อที่แสดงให้ทีมเห็น<input name="name" required placeholder="เช่น สมชาย (ช่างสำรวจ)" value="${esc(store.get('llan.joinName') || '')}"></label>
-      <button class="primary big">เข้าร่วมทีม</button>
+    const name0 = store.get('llan.joinName') || '';
+    box.innerHTML = `<div class="join-box">
+      <img src="icon.svg" alt=""><h2>รหัสผู้ใช้ของคุณ</h2>
+      <p class="muted">ส่งรหัสนี้ให้ผู้ดูแลหรือหัวหน้าทีม เพื่อเพิ่มคุณเข้าทีมสำรวจ เมื่อได้รับการเพิ่มแล้ว หน้านี้จะเข้าใช้งานให้เอง</p>
+      <div class="my-code"><b id="myCode">กำลังสร้างรหัส…</b><button type="button" class="small" data-copy-code>คัดลอก</button></div>
+      <label>ชื่อที่แสดงให้ทีมเห็น<input id="myName" placeholder="เช่น สมชาย (ช่างสำรวจ)" value="${esc(name0)}"></label>
+      <p class="muted">${esc(email)}</p>
+      <button type="button" class="primary big" data-check>ตรวจสอบว่าเข้าทีมแล้วหรือยัง</button>
       <div class="state" id="joinState"></div>
+      <details class="team-key"><summary>มีรหัสทีมจากหัวหน้าทีม? เข้าร่วมด้วยรหัสทีม</summary>
+        <form id="joinForm"><input name="key" required autocomplete="off" value="${esc(store.get('llan.joinKey') || '')}" placeholder="รหัสทีม เช่น A1B2-C3D4" style="text-transform:uppercase">
+        <input name="name" type="hidden"><button class="primary">เข้าร่วมทีม</button></form></details>
       <div class="row end">${canSkip ? '<button type="button" class="link" data-skip>ข้ามไปก่อน</button>' : ''}<button type="button" class="link" data-logout>ออกจากระบบ</button></div>
-    </form>`;
+    </div>`;
     document.body.append(box);
-    const form = box.querySelector('form');
+    const st = box.querySelector('#joinState'), nameIn = box.querySelector('#myName');
+    let timer = null, closed = false;
+    const finish = v => { if (closed) return; closed = true; clearInterval(timer); box.remove(); resolve(v); };
+    const showCode = async () => {
+      try { box.querySelector('#myCode').textContent = await cloud.rpc('llan_my_code', { p_name: nameIn.value.trim() }); }
+      catch (err) { box.querySelector('#myCode').textContent = '-'; st.textContent = err.message; }
+    };
+    const check = async (say = false) => {
+      try {
+        const m = await cloud.me(email);
+        if (m.role && m.team_id) return finish(m);
+        if (say) st.textContent = 'ยังไม่ได้อยู่ในทีม ส่งรหัสให้ผู้ดูแลหรือหัวหน้าทีม';
+      } catch (err) { if (say) st.textContent = err.message; }
+    };
+    showCode();
+    timer = setInterval(() => check(), every);
+    nameIn.addEventListener('change', () => { store.set('llan.joinName', nameIn.value.trim()); showCode(); });
+    box.querySelector('[data-check]').addEventListener('click', () => check(true));
+    box.querySelector('[data-copy-code]').addEventListener('click', () => {
+      const code = box.querySelector('#myCode').textContent;
+      navigator.clipboard?.writeText(code).then(() => { st.textContent = `คัดลอก ${code} แล้ว`; }, () => {});
+    });
+    const form = box.querySelector('#joinForm');
     form.addEventListener('submit', async e => {
       e.preventDefault();
-      const st = box.querySelector('#joinState');
       st.textContent = 'กำลังเข้าร่วมทีม…';
       try {
-        const [r] = await cloud.rpc('llan_join_team', { p_key: form.key.value.trim(), p_name: form.name.value.trim() });
-        store.set('llan.joinKey', null); store.set('llan.joinName', null);
-        box.remove(); resolve(r || {});
+        const [r] = await cloud.rpc('llan_join_team', { p_key: form.key.value.trim(), p_name: nameIn.value.trim() || form.name.value.trim() });
+        store.set('llan.joinKey', null);
+        finish(r || {});
       } catch (err) { st.textContent = err.message; }
     });
-    box.querySelector('[data-skip]')?.addEventListener('click', () => { box.remove(); resolve(null); });
-    box.querySelector('[data-logout]').addEventListener('click', () => { box.remove(); resolve('logout'); });
+    box.querySelector('[data-skip]')?.addEventListener('click', () => finish(null));
+    box.querySelector('[data-logout]').addEventListener('click', () => finish('logout'));
   });
 }
 
-export async function createSurvey({ cloud, email, me, ui }) {
+// office: the office machine (monitoring centre): sees everything as an admin, shares no position.
+export async function createSurvey({ cloud, email, me, ui, office = false }) {
   const { S, map, esc, toast, guard, confirmBox, $ } = ui;
   const T = { on: !!me.teams, me: { ...me }, teams: [], members: [], assign: new Map(), plans: [], keys: [], locations: [], timers: [],
     sharing: store.get('llan.share') !== 'off', pos: null, sent: null, watch: null, posError: null, showPeople: true, logQueue: [], mineToday: null, sum: null };
@@ -143,7 +171,7 @@ export async function createSurvey({ cloud, email, me, ui }) {
     return T.locations.map(l => {
       const stale = Date.now() - Date.parse(l.at) > 15 * 60 * 1000;
       return { kind: 'person', lon: l.lon, lat: l.lat, label: l.name || nameOf(l.email), sub: ago(l.at), initials: initialsOf(l.name || nameOf(l.email)),
-        color: stale ? '#8a96a3' : colorOf(l.email), faded: stale, data: l };
+        color: stale ? '#8a96a3' : isAdmin() ? teamOf(l.team_id)?.color || colorOf(l.email) : colorOf(l.email), faded: stale, data: l };
     });
   }
   function onMarker(m) {
@@ -153,12 +181,12 @@ export async function createSurvey({ cloud, email, me, ui }) {
   }
   async function loadLocations() {
     if (!T.on || !isLead()) return;
-    try { T.locations = await cloud.get('llan_locations?select=*&order=at.desc'); ui.updateMarkers(); if (ui.activeTab() === 'team') renderTeam(); } catch (err) { console.warn(err.message); }
+    try { T.locations = await cloud.get('llan_locations?select=*&order=at.desc'); ui.updateMarkers(); chips(); if (ui.activeTab() === 'team' && !document.querySelector('#tab-team :focus')) renderTeam(); } catch (err) { console.warn(err.message); }
   }
 
   // ---------- my position, shared with the team ----------
   function startSharing() {
-    if (!T.on || T.watch != null || !('geolocation' in navigator) || !window.isSecureContext) return;
+    if (office || !T.on || T.watch != null || !('geolocation' in navigator) || !window.isSecureContext) return;
     T.watch = navigator.geolocation.watchPosition(p => {
       T.pos = { lat: p.coords.latitude, lon: p.coords.longitude, accuracy: p.coords.accuracy, heading: p.coords.heading, speed: p.coords.speed };
       T.posError = null; sendPos();
@@ -192,6 +220,11 @@ export async function createSurvey({ cloud, email, me, ui }) {
     const box = $('#surveyChips');
     if (!box) return;
     if (!T.on) { box.innerHTML = ''; return; }
+    if (office) {
+      const online = T.locations.filter(l => Date.now() - Date.parse(l.at) < 15 * 60 * 1000).length;
+      box.innerHTML = `<button class="chip monitor" data-chip="team" title="ศูนย์ติดตามทีมสำรวจ"><i></i>ทีมสำรวจ: ออนไลน์ <b>${online}</b>/${T.members.filter(m => m.team_id).length} คน</button>`;
+      return;
+    }
     const team = teamOf(T.me.team_id), tt = todayTarget();
     box.innerHTML = `${team ? `<span class="chip team" style="--c:${team.color}"><i></i>${esc(team.name)}${T.me.team_role === 'lead' ? ' · หัวหน้าทีม' : ''}</span>` : isAdmin() ? '<span class="chip">ผู้ดูแลระบบ</span>' : '<button class="chip warn" data-chip="join">ยังไม่มีทีม · เข้าร่วมทีม</button>'}
       ${tt.due ? `<button class="chip today" data-chip="mywork" title="งานที่ถึงกำหนดวันนี้ (รวมที่ค้าง)">วันนี้ <b>${tt.done}/${tt.due}</b></button>` : ''}
@@ -206,9 +239,10 @@ export async function createSurvey({ cloud, email, me, ui }) {
       await setSharing(!T.sharing);
     })();
     if (c.dataset.chip === 'mywork') ui.goTab('mywork');
+    if (c.dataset.chip === 'team') ui.goTab('team');
     if (c.dataset.chip === 'join') guard(async () => {
-      const r = await askJoin({ cloud, email, canSkip: true, esc });
-      if (r && r !== 'logout') { await load(); chips(); toast(`เข้าร่วม${r.team_name || 'ทีม'}แล้ว`); ui.refreshMap(); }
+      const r = await waitForTeam({ cloud, email, canSkip: true, esc });
+      if (r && r !== 'logout') { await load(); chips(); toast(`เข้าทีม${teamName(r.team_id) || r.team_name || ''}แล้ว`); ui.refreshMap(); }
     })();
   });
 
@@ -283,10 +317,34 @@ export async function createSurvey({ cloud, email, me, ui }) {
           <select data-mset="${esc(m.email)}" data-k="role">${[['viewer', 'ดูอย่างเดียว'], ['editor', 'แก้ไขได้'], ['admin', 'ผู้ดูแล']].map(([v, l2]) => `<option value="${v}" ${m.role === v ? 'selected' : ''}>${l2}</option>`).join('')}</select></td>` : ''}</tr>`;
     };
     const noTeam = isAdmin() ? T.members.filter(m => !m.team_id) : [];
+    // Monitoring: today across the teams this person may see.
+    let todaySum = null, pending = [];
+    if (isLead()) {
+      todaySum = await cloud.getAll('llan_work_log', 'at,by_user,team_id,code,action,state', `&at=gte.${encodeURIComponent(startOf(t))}${isAdmin() ? '' : `&team_id=eq.${encodeURIComponent(mineTeam || '')}`}`, 'at.asc')
+        .then(rows => summarize(rows)).catch(() => null);
+      if (isAdmin()) pending = await cloud.rpc('llan_pending_users').catch(() => []);
+    }
+    if (!office && T.myCode === undefined) T.myCode = await cloud.rpc('llan_my_code', { p_name: '' }).catch(() => null);
+    const visible = isAdmin() ? T.members.filter(m => m.team_id) : teamMembers(mineTeam);
+    const online = visible.filter(m => { const l = loc(m.email); return l && Date.now() - Date.parse(l.at) < 15 * 60 * 1000; }).length;
+    const teamProg = progress([...T.assign.values()], stateOf, { today: t, team: isAdmin() ? undefined : mineTeam });
+    const addTeams = isAdmin() ? T.teams : T.teams.filter(x => x.id === mineTeam);
     page('team', `
-      <div class="page-head"><div><h2>ทีมสำรวจ</h2><p class="muted">${isAdmin() ? `ผู้ดูแลระบบ: ${T.teams.length} ทีม · สมาชิก ${T.members.length} คน` : teamName(mineTeam) ? esc(teamName(mineTeam)) : 'ยังไม่ได้อยู่ในทีม'}</p></div>
+      <div class="page-head"><div><h2>${office ? 'ศูนย์ติดตามทีมสำรวจ' : 'ทีมสำรวจ'}</h2><p class="muted">${isAdmin() ? `${T.teams.length} ทีม · สมาชิก ${T.members.length} คน` : teamName(mineTeam) ? esc(teamName(mineTeam)) : 'ยังไม่ได้อยู่ในทีม'}${T.myCode ? ` · รหัสผู้ใช้ของฉัน <b class="code">${esc(T.myCode)}</b>` : ''}</p></div>
         <div class="row">${isLead() ? `<label class="check"><input type="checkbox" id="showPeople" ${T.showPeople ? 'checked' : ''}> แสดงตำแหน่งทีมบนแผนที่</label><button data-act="people-map">ดูตำแหน่งทั้งหมดบนแผนที่</button>` : ''}
-          <button class="${T.sharing ? '' : 'primary'}" data-chip="share">${T.sharing ? 'หยุดแชร์ตำแหน่งของฉัน' : 'แชร์ตำแหน่งของฉัน'}</button></div></div>
+          ${office ? '' : `<button class="${T.sharing ? '' : 'primary'}" data-chip="share">${T.sharing ? 'หยุดแชร์ตำแหน่งของฉัน' : 'แชร์ตำแหน่งของฉัน'}</button>`}</div></div>
+      ${isLead() ? `<div class="kpis">${kpi('ออนไลน์ตอนนี้', `${online}/${visible.length}`, 'ส่งตำแหน่งใน 15 นาที', online ? 'ok' : '')}
+        ${kpi('สำรวจเสร็จวันนี้', (todaySum?.total.done ?? 0).toLocaleString(), 'แปลง')}${kpi('ต้องกลับไปซ้ำวันนี้', (todaySum?.total.revisit ?? 0).toLocaleString(), 'แปลง', todaySum?.total.revisit ? 'err' : '')}
+        ${kpi('งานวันนี้ตามแผน', teamProg.dueToday.toLocaleString(), 'แปลงที่ถึงกำหนดวันนี้')}${kpi('ค้างตามแผน', teamProg.overdue.toLocaleString(), 'แปลง', teamProg.overdue ? 'warn' : '')}</div>
+      <div class="panel"><h3>เพิ่มสมาชิกด้วยรหัสผู้ใช้</h3>
+        <form class="row" id="addByCode"><input name="code" required placeholder="รหัสผู้ใช้ เช่น K7Q2-9M4A" style="text-transform:uppercase;width:180px">
+          <select name="team">${addTeams.map(x => `<option value="${esc(x.id)}" ${x.id === mineTeam ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
+          ${isAdmin() ? '<select name="trole"><option value="member">ลูกทีม</option><option value="lead">หัวหน้าทีม</option></select>' : ''}
+          <button class="primary">เพิ่มเข้าทีม</button></form>
+        <p class="muted">ผู้ใช้เปิดหน้าเว็บสำรวจแล้วสมัคร/เข้าสู่ระบบ จะเห็นรหัสผู้ใช้ของตัวเอง ให้ส่งรหัสนั้นมา${isAdmin() ? '' : ' (หัวหน้าทีมเพิ่มได้เฉพาะลูกทีมในทีมตัวเอง)'}</p>
+        ${pending.length ? `<h4>รอเข้าทีม ${pending.length} คน</h4><div class="table-wrap"><table class="grid"><tr><th>ชื่อ</th><th>อีเมล</th><th>รหัสผู้ใช้</th><th>สมัครเมื่อ</th><th></th></tr>
+          ${pending.map(u => `<tr><td>${esc(u.name || '-')}</td><td>${esc(u.email)}</td><td><b class="code">${esc(u.code)}</b></td><td class="muted">${esc(ago(u.created_at))}</td>
+            <td><button class="small" data-fill-code="${esc(u.code)}">ใช้รหัสนี้</button></td></tr>`).join('')}</table></div>` : ''}</div>` : ''}
       ${isAdmin() ? `<div class="panel"><h3>สร้างทีมใหม่</h3><form class="row" id="teamNew"><input name="name" placeholder="ชื่อทีม เช่น ทีมสำรวจหมู่ 1-3" required>
         <input name="color" type="color" value="${PALETTE[T.teams.length % PALETTE.length]}" title="สีทีม"><button class="primary">สร้างทีม</button></form>
         <p class="muted">ได้รหัสเข้าร่วมทีมทันที ส่งรหัสให้ลูกทีม: ลูกทีมสมัคร/เข้าสู่ระบบที่หน้าเว็บนี้ แล้วใส่รหัส ตั้งหัวหน้าทีมได้ในตารางสมาชิก</p></div>` : ''}
@@ -428,7 +486,7 @@ export async function createSurvey({ cloud, email, me, ui }) {
 
   // ---------- page events ----------
   document.addEventListener('click', e => {
-    const el = e.target.closest('[data-go],[data-act],[data-seg] button,[data-day],[data-person],[data-copy],[data-newkey],[data-locate],[data-plan-map],[data-plan-del],[data-team-edit],[data-team-del]');
+    const el = e.target.closest('[data-go],[data-act],[data-seg] button,[data-day],[data-person],[data-copy],[data-fill-code],[data-newkey],[data-locate],[data-plan-map],[data-plan-del],[data-team-edit],[data-team-del]');
     if (!el || !el.closest('.page')) return;
     guard(async () => {
       if (el.dataset.go) return goParcel(el.dataset.go);
@@ -440,6 +498,7 @@ export async function createSurvey({ cloud, email, me, ui }) {
       if (el.dataset.day !== undefined && el.closest('table.daily')) { SUM.day = SUM.day === el.dataset.day ? '' : el.dataset.day; return renderSummary(); }
       if (el.dataset.person) { SUM.person = SUM.person === el.dataset.person ? '' : el.dataset.person; return renderSummary(); }
       if (el.dataset.copy) { await navigator.clipboard?.writeText(el.dataset.copy).catch(() => {}); return toast(`คัดลอกรหัส ${el.dataset.copy} แล้ว`); }
+      if (el.dataset.fillCode) { const f = $('#addByCode'); f.code.value = el.dataset.fillCode; f.code.focus(); return; }
       if (el.dataset.newkey) {
         if (!(await confirmBox('สร้างรหัสเข้าร่วมทีมใหม่?<br><span class="muted">รหัสเดิมจะใช้ไม่ได้ สมาชิกที่อยู่ในทีมแล้วไม่ได้รับผลกระทบ</span>', { ok: 'สร้างรหัสใหม่' }))) return;
         const k = await cloud.rpc('llan_team_new_key', { p_id: el.dataset.newkey }); await load(); renderTeam(); return toast(`รหัสใหม่: ${k}`);
@@ -516,6 +575,15 @@ export async function createSurvey({ cloud, email, me, ui }) {
     })();
   });
   document.addEventListener('submit', e => {
+    if (e.target.id === 'addByCode') {
+      e.preventDefault();
+      const f = e.target;
+      return guard(async () => {
+        const [u] = await cloud.rpc('llan_add_by_code', { p_code: f.code.value.trim(), p_team_id: f.team.value, p_team_role: f.trole?.value || 'member', p_role: 'editor' });
+        await load(); chips(); renderTeam(); ui.refreshMap();
+        toast(`เพิ่ม ${u?.name || u?.email || 'ผู้ใช้'} เข้า${teamName(f.team.value)}แล้ว`);
+      })();
+    }
     if (e.target.id !== 'teamNew') return;
     e.preventDefault();
     guard(async () => {
@@ -529,7 +597,7 @@ export async function createSurvey({ cloud, email, me, ui }) {
   // ---------- start / stop ----------
   await load();
   return {
-    get on() { return T.on; }, get me() { return T.me; }, isLead, isAdmin,
+    get on() { return T.on; }, get me() { return T.me; }, isLead, isAdmin, office,
     lockOf, assignInfo, logWork, styleOf, markers, onMarker, chips,
     lockForCodes: codes => codes.map(lockOf).find(Boolean) || null,
     render: { mywork: renderMyWork, team: renderTeam, summary: renderSummary, plan: renderPlan },

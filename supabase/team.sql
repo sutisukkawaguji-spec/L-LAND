@@ -102,6 +102,62 @@ begin
   where lower(email) = lower(p_email);
 end $$;
 
+-- Personal user codes: everyone who signs in gets a code (e.g. K7Q2-9M4A) to give the admin or the team
+-- lead, who adds them to a team with it. The table is read only through the functions below.
+create table if not exists public.llan_user_codes (
+  email text primary key,
+  code text not null unique,
+  name text,
+  created_at timestamptz not null default now()
+);
+alter table public.llan_user_codes enable row level security;
+revoke all on public.llan_user_codes from anon, authenticated;
+create or replace function public.llan_my_code(p_name text) returns text
+language plpgsql security definer set search_path = public as $$
+declare me text := public.llan_email(); c text;
+begin
+  if me is null then raise exception 'กรุณาเข้าสู่ระบบก่อน'; end if;
+  select code into c from public.llan_user_codes where email = me;
+  if c is null then
+    loop
+      c := upper(substr(md5(random()::text || clock_timestamp()::text), 1, 4) || '-' || substr(md5(random()::text || me), 1, 4));
+      exit when not exists (select 1 from public.llan_user_codes where code = c);
+    end loop;
+    insert into public.llan_user_codes (email, code, name) values (me, c, nullif(trim(p_name), ''));
+  elsif coalesce(trim(p_name), '') <> '' then
+    update public.llan_user_codes set name = trim(p_name) where email = me;
+  end if;
+  return c;
+end $$;
+-- Admins add anyone to any team; a team lead adds people (as members) to their own team.
+create or replace function public.llan_add_by_code(p_code text, p_team_id text, p_team_role text, p_role text) returns table (email text, name text)
+language plpgsql security definer set search_path = public as $$
+#variable_conflict use_column
+declare u public.llan_user_codes; old public.llan_members; admin boolean := public.llan_role() = 'admin';
+begin
+  select * into u from public.llan_user_codes c where upper(c.code) = upper(trim(p_code));
+  if u.email is null then raise exception 'ไม่พบรหัสผู้ใช้นี้ ให้ผู้ใช้เปิดหน้าเว็บแล้วดูรหัสอีกครั้ง' using errcode = '22023'; end if;
+  if coalesce(p_team_id, '') = '' then raise exception 'เลือกทีมก่อน'; end if;
+  if not public.llan_is_lead(p_team_id) then raise exception 'เพิ่มสมาชิกได้เฉพาะผู้ดูแล หรือหัวหน้าของทีมนั้น' using errcode = '42501'; end if;
+  select * into old from public.llan_members m where lower(m.email) = lower(u.email);
+  if not admin and old.team_id is not null and old.team_id <> p_team_id then raise exception 'ผู้ใช้นี้อยู่ในทีมอื่น ให้ผู้ดูแลเป็นผู้ย้ายทีม' using errcode = '42501'; end if;
+  insert into public.llan_members (email, role, team_id, team_role, display_name)
+    values (u.email, case when admin then coalesce(nullif(p_role, ''), 'editor') else 'editor' end, p_team_id,
+      case when admin then coalesce(nullif(p_team_role, ''), 'member') else 'member' end, u.name)
+  on conflict (email) do update set team_id = excluded.team_id,
+    team_role = case when admin then excluded.team_role else public.llan_members.team_role end,
+    role = case when admin then excluded.role else public.llan_members.role end,
+    display_name = coalesce(public.llan_members.display_name, excluded.display_name);
+  return query select u.email, u.name;
+end $$;
+-- People who have a code but no team yet (admins only).
+create or replace function public.llan_pending_users() returns table (email text, code text, name text, created_at timestamptz)
+language sql stable security definer set search_path = public as $$
+  select c.email, c.code, c.name, c.created_at from public.llan_user_codes c
+  where public.llan_role() = 'admin' and not exists (select 1 from public.llan_members m where lower(m.email) = lower(c.email) and m.team_id is not null)
+  order by c.created_at desc
+$$;
+
 -- Where each surveyor is (one row per person, kept up to date by the page while it is open).
 create table if not exists public.llan_locations (
   email text primary key,

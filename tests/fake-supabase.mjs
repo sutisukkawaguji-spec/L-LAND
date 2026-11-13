@@ -10,9 +10,11 @@ const COLUMNS = { llan_parcel_status: ['id', 'code', 'status', 'link', 'ltax', '
 
 export function fakeSupabase(members = { 'admin@test.local': 'admin', 'editor@test.local': 'editor', 'viewer@test.local': 'viewer' }, { teams = true } = {}) {
   const t = { llan_records: new Map(), llan_features: new Map(), llan_layers: new Map(), llan_deleted: new Map(), llan_change_log: new Map(), llan_config: new Map(), llan_feature_log: new Map(), llan_parcel_status: new Map(),
-    llan_teams: new Map(), llan_locations: new Map(), llan_work_log: new Map(), llan_plans: new Map(), llan_assignments: new Map() };
+    llan_teams: new Map(), llan_locations: new Map(), llan_work_log: new Map(), llan_plans: new Map(), llan_assignments: new Map(), llan_user_codes: new Map() };
   // Team of each member (supabase/team.sql): email → { team_id, team_role, display_name }
   const info = new Map();
+  // Personal user codes (table llan_user_codes, readable only with the secret key): email → { email, code, name, created_at }
+  const codes = t.llan_user_codes;
   let keySeq = 0;
   const newKey = () => `KEY${String(++keySeq).padStart(2, '0')}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
   let serial = 0, last = 0;
@@ -98,9 +100,26 @@ export function fakeSupabase(members = { 'admin@test.local': 'admin', 'editor@te
     const myTeam = email ? info.get(email)?.team_id || null : null;
     const isLead = team => service || role === 'admin' || (!!team && myTeam === team && info.get(email)?.team_role === 'lead');
     const TEAM_TABLES = ['llan_teams', 'llan_locations', 'llan_work_log', 'llan_plans', 'llan_assignments'];
-    if (!teams && (TEAM_TABLES.includes(name) || name.startsWith('rpc/llan_team') || name === 'rpc/llan_join_team' || name === 'rpc/llan_member_set'))
+    if (!teams && (TEAM_TABLES.includes(name) || name.startsWith('rpc/llan_team') || ['rpc/llan_join_team', 'rpc/llan_member_set', 'rpc/llan_my_code', 'rpc/llan_add_by_code', 'rpc/llan_pending_users'].includes(name)))
       return send(404, { code: 'PGRST205', message: `Could not find the table 'public.${name}' in the schema cache` });
     const raise = (code, message) => send(400, { code, message });
+    // The office (secret key) manages members directly.
+    if (req.method === 'PATCH' && name === 'llan_members') {
+      if (!service) return denied();
+      const e = decodeURIComponent((url.searchParams.get('email') || '').replace(/^eq\./, '')).toLowerCase(), old = info.get(e) || {};
+      if (body.role) members[e] = body.role;
+      info.set(e, { team_id: 'team_id' in body ? body.team_id : old.team_id ?? null, team_role: body.team_role || old.team_role || 'member', display_name: body.display_name || old.display_name || null });
+      return send(204);
+    }
+    if (req.method === 'POST' && name === 'llan_members') {
+      if (!service) return denied();
+      for (const r of Array.isArray(body) ? body : [body]) {
+        const e = String(r.email).toLowerCase(), old = info.get(e) || {};
+        if (r.role) members[e] = r.role; else if (!members[e]) members[e] = 'editor';
+        info.set(e, { team_id: 'team_id' in r ? r.team_id : old.team_id ?? null, team_role: r.team_role || old.team_role || 'member', display_name: 'display_name' in r ? r.display_name : old.display_name ?? null });
+      }
+      return send(201);
+    }
     if (name === 'llan_members') {
       const sel = url.searchParams.get('select') || '*';
       if (!teams && /team_id|team_role|display_name/.test(sel)) return send(400, { code: '42703', message: 'column llan_members.team_id does not exist' });
@@ -118,6 +137,28 @@ export function fakeSupabase(members = { 'admin@test.local': 'admin', 'editor@te
       const old = info.get(email);
       info.set(email, { team_id: team.id, team_role: old?.team_id === team.id ? old.team_role : 'member', display_name: String(body.p_name || '').trim() || old?.display_name || null });
       return send(200, [{ team_id: team.id, team_name: team.name, role: members[email], team_role: info.get(email).team_role }]);
+    }
+    if (name === 'rpc/llan_my_code') {
+      if (!email) return raise('P0001', 'กรุณาเข้าสู่ระบบก่อน');
+      if (!codes.has(email)) codes.set(email, { email, code: `U${String(codes.size + 1).padStart(3, '0')}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`, name: String(body.p_name || '').trim() || null, created_at: now() });
+      else if (String(body.p_name || '').trim()) codes.get(email).name = String(body.p_name).trim();
+      return send(200, codes.get(email).code);
+    }
+    if (name === 'rpc/llan_add_by_code') {
+      const hit = [...codes].find(([, c]) => c.code.toUpperCase() === String(body.p_code || '').trim().toUpperCase());
+      if (!hit) return raise('22023', 'ไม่พบรหัสผู้ใช้นี้ ให้ผู้ใช้เปิดหน้าเว็บแล้วดูรหัสอีกครั้ง');
+      if (!body.p_team_id) return raise('P0001', 'เลือกทีมก่อน');
+      if (!isLead(body.p_team_id)) return raise('42501', 'เพิ่มสมาชิกได้เฉพาะผู้ดูแล หรือหัวหน้าของทีมนั้น');
+      const admin = service || role === 'admin', [e, c] = hit, old = info.get(e);
+      if (!admin && old?.team_id && old.team_id !== body.p_team_id) return raise('42501', 'ผู้ใช้นี้อยู่ในทีมอื่น ให้ผู้ดูแลเป็นผู้ย้ายทีม');
+      if (!members[e]) members[e] = admin ? body.p_role || 'editor' : 'editor';
+      else if (admin && body.p_role) members[e] = body.p_role;
+      info.set(e, { team_id: body.p_team_id, team_role: admin ? body.p_team_role || 'member' : old?.team_role || 'member', display_name: old?.display_name || c.name });
+      return send(200, [{ email: e, name: c.name }]);
+    }
+    if (name === 'rpc/llan_pending_users') {
+      if (role !== 'admin') return send(200, []);
+      return send(200, [...codes].filter(([e]) => !info.get(e)?.team_id).map(([e, c]) => ({ email: e, code: c.code, name: c.name, created_at: c.created_at })));
     }
     if (name === 'rpc/llan_team_save') {
       if (role !== 'admin') return raise('42501', 'เฉพาะผู้ดูแลระบบสร้างหรือแก้ทีมได้');
@@ -163,8 +204,9 @@ export function fakeSupabase(members = { 'admin@test.local': 'admin', 'editor@te
     if (req.method === 'GET') {
       if (!role) return send(200, []);
       if (name === 'llan_config' && !service && !role) return send(200, []);
+      if (name === 'llan_user_codes' && !service) return send(200, []);
       let rows = [...table.values()].filter(match).filter(canSee);
-      if (name === 'llan_teams') rows = rows.map(({ join_key, ...r }) => r);
+      if (name === 'llan_teams' && !service) rows = rows.map(({ join_key, ...r }) => r);
       const order = (url.searchParams.get('order') || 'id').split(',').map(o => o.split('.'));
       rows.sort((a, b) => { for (const [k, dir] of order) { const c = cmp(a[k] ?? '', b[k] ?? ''); if (c) return dir === 'desc' ? -c : c; } return 0; });
       if (url.searchParams.get('limit')) rows = rows.slice(0, Number(url.searchParams.get('limit')));
@@ -181,6 +223,21 @@ export function fakeSupabase(members = { 'admin@test.local': 'admin', 'editor@te
       if (!canWrite) return denied();
       for (const r of Array.isArray(body) ? body : [body]) { const id = ++serial; table.set(String(id), { ...r, id, by_user: email, team_id: myTeam, at: r.at && service ? r.at : now() }); }
       return send(201);
+    }
+    if (req.method === 'POST' && name === 'llan_teams') {
+      if (!service) return denied();
+      for (const r of Array.isArray(body) ? body : [body]) t.llan_teams.set(r.id, { ...(t.llan_teams.get(r.id) || { created_at: now() }), ...r });
+      return send(201);
+    }
+    if (req.method === 'PATCH' && name === 'llan_teams') {
+      if (!service) return denied();
+      for (const r of t.llan_teams.values()) if (match(r)) Object.assign(r, body);
+      return send(204);
+    }
+    if (req.method === 'DELETE' && name === 'llan_teams') {
+      if (!service) return denied();
+      for (const [k, r] of t.llan_teams) if (match(r)) { t.llan_teams.delete(k); for (const [e, i] of info) if (i.team_id === k) info.set(e, { ...i, team_id: null }); }
+      return send(204);
     }
     if (req.method === 'POST' && (name === 'llan_plans' || name === 'llan_assignments')) {
       const list = Array.isArray(body) ? body : [body];
@@ -222,7 +279,7 @@ export function fakeSupabase(members = { 'admin@test.local': 'admin', 'editor@te
     }
     send(405, { message: 'method' });
   });
-  return { server, t, state, members, info };
+  return { server, t, state, members, info, codes };
 }
 
 export const listen = (srv, host = '127.0.0.1') => new Promise(r => srv.listen(0, host, () => r(`http://${host}:${srv.address().port}`)));

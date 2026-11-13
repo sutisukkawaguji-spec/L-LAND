@@ -1443,7 +1443,7 @@ async function webOpen() {
   let me = await cloud.me(email);
   if (me.teams && (!me.role || (!me.team_id && me.role !== 'admin'))) {
     $('#loginState').textContent = '';
-    const joined = await surveyMod.askJoin({ cloud, email, canSkip: !!me.role, esc });
+    const joined = await surveyMod.waitForTeam({ cloud, email, canSkip: !!me.role, esc });
     if (joined === 'logout') return webSignOut();
     if (joined) me = await cloud.me(email);
   }
@@ -1451,12 +1451,7 @@ async function webOpen() {
   if (!role) throw new Error('บัญชีนี้ยังไม่ได้รับสิทธิ์ใช้งาน: ใส่รหัสทีมจากหัวหน้าทีม หรือให้ผู้ดูแลเพิ่มอีเมลใน llan_members');
   $('#loginState').textContent = 'กำลังโหลดข้อมูล…';
   const store = await new CloudStore(cloud, { email }).open();
-  const survey = await surveyMod.createSurvey({ cloud, email, me, ui: { S, map, esc, toast, guard, confirmBox, $, ownerNames, showFeature, goTab, activeTab: () => activeTab,
-    refreshMap: () => refreshMap(), updateMarkers, setColor: mode => { $('#mapColor').value = mode; refreshMap(); },
-    flyTo: (lon, lat) => { map.center = toMercator(lon, lat); map.res = Math.min(map.res, 1.5); map.draw(); },
-    fitCodes: codes => { const fs = map.layers.flatMap(l => l.features).filter(f => codes.has(String(f.code || '').toUpperCase())); if (fs.length) map.fit(fs, 60); },
-    fitPeople: locs => { if (!locs.length) return toast('ยังไม่มีตำแหน่งของสมาชิก', true); const xs = locs.map(l => toMercator(l.lon, l.lat)); map.center = [xs.reduce((s, p) => s + p[0], 0) / xs.length, xs.reduce((s, p) => s + p[1], 0) / xs.length]; map.res = Math.max(1, Math.max(...xs.map(p => Math.abs(p[0] - map.center[0])), ...xs.map(p => Math.abs(p[1] - map.center[1]))) * 2.6 / Math.min(map.w, map.h)); map.draw(); },
-    preview: (rows, style) => { PREVIEW = rows ? { rows, style } : null; if (rows) $('#mapColor').value = 'assign'; refreshMap(); } } });
+  const survey = await surveyMod.createSurvey({ cloud, email, me, ui: surveyUi() });
   Object.assign(WEBAUTH, { store, role, cloud, survey, dispatch: router(coreRoutes(store, { settings: () => ({ ...store.settings, cloud: {} }), state: () => ({ dataDir: 'Supabase (ออนไลน์)' }),
     statuses: () => ({ rows: store.list('statuses'), checkedAt: store.statusCheckedAt }),
     ...(survey.on ? { team: () => survey.me.team_id || null, locked: code => survey.lockOf(code), onWork: ev => survey.logWork(ev) } : {}) })) });
@@ -1533,10 +1528,43 @@ if (WEB) document.addEventListener('click', e => {
   })();
 });
 
+// What the survey-team pages (survey.js) may use of this page.
+function surveyUi() {
+  return { S, map, esc, toast, guard, confirmBox, $, ownerNames, showFeature, goTab, activeTab: () => activeTab,
+    refreshMap: () => refreshMap(), updateMarkers, setColor: mode => { $('#mapColor').value = mode; refreshMap(); },
+    flyTo: (lon, lat) => { map.center = toMercator(lon, lat); map.res = Math.min(map.res, 1.5); map.draw(); },
+    fitCodes: codes => { const fs = map.layers.flatMap(l => l.features).filter(f => codes.has(String(f.code || '').toUpperCase())); if (fs.length) map.fit(fs, 60); },
+    fitPeople: locs => {
+      if (!locs.length) return toast('ยังไม่มีตำแหน่งของสมาชิก', true);
+      const xs = locs.map(l => toMercator(l.lon, l.lat));
+      map.center = [xs.reduce((s, p) => s + p[0], 0) / xs.length, xs.reduce((s, p) => s + p[1], 0) / xs.length];
+      map.res = Math.max(1, Math.max(...xs.map(p => Math.abs(p[0] - map.center[0])), ...xs.map(p => Math.abs(p[1] - map.center[1]))) * 2.6 / Math.min(map.w, map.h));
+      map.draw();
+    },
+    preview: (rows, style) => { PREVIEW = rows ? { rows, style } : null; if (rows) $('#mapColor').value = 'assign'; refreshMap(); } };
+}
+// The office machine is the monitoring centre of the survey teams: every team and every surveyor,
+// through the office server (which reaches Supabase with the secret key).
+async function officeTeams() {
+  const cfg = S.settings.cloud || {};
+  if (!cfg.url || !cfg.hasKey) return;
+  const call = async (op, ...args) => (await api('POST', '/api/team/call', { op, args })).result;
+  const proxy = { get: p => call('get', p), getAll: (...a) => call('getAll', ...a), upsertOn: (...a) => call('upsertOn', ...a), deleteWhere: (...a) => call('deleteWhere', ...a),
+    insertRows: async () => {}, rpc: (name, args) => call('rpc', name, args) };
+  const surveyMod = await import('./survey.js');
+  const survey = await surveyMod.createSurvey({ cloud: proxy, email: 'office', me: { email: 'office', role: 'admin', team_id: null, team_role: 'lead', display_name: 'สำนักงาน', teams: true }, ui: surveyUi(), office: true });
+  if (!survey.on) return;
+  WEBAUTH.survey = survey;
+  document.body.classList.add('teams', 'lead', 'office-teams');
+  survey.start();
+  refreshMap();
+}
+
 // ---------- start ----------
 guard(async () => {
   if (WEB) return webStart();
   S.session = await api('GET', '/api/session');
   showSession();
   await reloadAll(); ltaxStatus(); setInterval(ltaxStatus, 15000); startEvents();
+  officeTeams().catch(err => console.warn('ทีมสำรวจ:', err.message));
 })();
