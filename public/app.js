@@ -1485,21 +1485,23 @@ function webStart() {
     + '<form id="webLogin"><input id="wEmail" type="email" placeholder="อีเมล" autocomplete="username" required>'
     + '<input id="wPass" type="password" placeholder="รหัสผ่าน" autocomplete="current-password" required>'
     + '<button class="primary big">เข้าสู่ระบบ</button></form><div id="loginState" class="state"></div>'
-    + '<button type="button" class="link" id="showSignup">ยังไม่มีบัญชี? สมัครใช้งานด้วยรหัสทีม</button>'
+    + '<button type="button" class="link" id="showSignup">ยังไม่มีบัญชี? สมัครใช้งาน</button>'
     + '<form id="webSignup" hidden><input id="sEmail" type="email" placeholder="อีเมล" autocomplete="username" required>'
     + '<input id="sPass" type="password" placeholder="ตั้งรหัสผ่าน (อย่างน้อย 6 ตัว)" minlength="6" autocomplete="new-password" required>'
-    + '<input id="sName" placeholder="ชื่อที่แสดงให้ทีมเห็น" required><input id="sKey" placeholder="รหัสทีม (จากหัวหน้าทีม)" required style="text-transform:uppercase">'
-    + '<button class="primary big">สมัครและเข้าร่วมทีม</button></form>'
+    + '<input id="sName" placeholder="ชื่อที่แสดงให้ทีมเห็น เช่น สมชาย (ช่างสำรวจ)" required>'
+    + '<button class="primary big">สมัครใช้งาน</button>'
+    + '<p class="muted">สมัครแล้วเข้าใช้งานได้ทันที เปิด "ตั้งค่าส่วนตัว" จะเห็นรหัสผู้ใช้ ส่งรหัสนั้นให้หัวหน้าทีมเพื่อเพิ่มเข้าทีม</p></form>'
     + '<a class="link" href="map.html">เปิดแผนที่อย่างเดียว (เบากว่า)</a>';
-  $('#showSignup').addEventListener('click', () => { $('#webSignup').hidden = !$('#webSignup').hidden; $('#webLogin').hidden = !$('#webSignup').hidden; $('#showSignup').textContent = $('#webSignup').hidden ? 'ยังไม่มีบัญชี? สมัครใช้งานด้วยรหัสทีม' : 'มีบัญชีแล้ว? เข้าสู่ระบบ'; });
+  $('#showSignup').addEventListener('click', () => { $('#webSignup').hidden = !$('#webSignup').hidden; $('#webLogin').hidden = !$('#webSignup').hidden; $('#showSignup').textContent = $('#webSignup').hidden ? 'ยังไม่มีบัญชี? สมัครใช้งาน' : 'มีบัญชีแล้ว? เข้าสู่ระบบ'; });
   $('#webSignup').addEventListener('submit', guard(async e => {
     e.preventDefault();
-    try { localStorage.setItem('llan.joinKey', $('#sKey').value.trim()); localStorage.setItem('llan.joinName', $('#sName').value.trim()); } catch { /* blocked */ }
+    // The name goes with the user code once signed in (ตั้งค่าส่วนตัว).
+    try { localStorage.setItem('llan.joinName', $('#sName').value.trim()); } catch { /* blocked */ }
     $('#loginState').textContent = 'กำลังสมัคร…';
     let d;
     try { d = await sbAuth('signup', { email: $('#sEmail').value.trim(), password: $('#sPass').value, data: { name: $('#sName').value.trim() } }); }
-    catch (err) { $('#loginState').textContent = /already|registered/i.test(err.message) ? 'อีเมลนี้มีบัญชีแล้ว ให้เข้าสู่ระบบ แล้วใส่รหัสทีม' : err.message; return; }
-    if (!d.access_token) { $('#loginState').textContent = 'สมัครแล้ว: เปิดอีเมลแล้วกดลิงก์ยืนยัน จากนั้นกลับมาเข้าสู่ระบบ ระบบจะใส่รหัสทีมให้'; return; }
+    catch (err) { $('#loginState').textContent = /already|registered/i.test(err.message) ? 'อีเมลนี้มีบัญชีแล้ว ให้เข้าสู่ระบบ' : err.message; return; }
+    if (!d.access_token) { $('#loginState').textContent = 'สมัครแล้ว: เปิดอีเมลแล้วกดลิงก์ยืนยัน จากนั้นกลับมาเข้าสู่ระบบ แล้วเปิด "ตั้งค่าส่วนตัว" เพื่อดูรหัสผู้ใช้'; return; }
     keepWeb(d);
     try { await webOpen(); } catch (err) { $('#loginState').textContent = err.message; }
   }));

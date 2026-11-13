@@ -285,7 +285,7 @@ export async function createSurvey({ cloud, email, me, ui, office = false }) {
             <td><button class="small" data-fill-code="${esc(u.code)}">ใช้รหัสนี้</button></td></tr>`).join('')}</table></div>` : ''}</div>` : ''}
       ${isAdmin() ? `<div class="panel"><h3>สร้างทีมใหม่</h3><form class="row" id="teamNew"><input name="name" placeholder="ชื่อทีม เช่น ทีมสำรวจหมู่ 1-3" required>
         <input name="color" type="color" value="${PALETTE[T.teams.length % PALETTE.length]}" title="สีทีม"><button class="primary">สร้างทีม</button></form>
-        <p class="muted">ได้รหัสเข้าร่วมทีมทันที ส่งรหัสให้ลูกทีม: ลูกทีมสมัคร/เข้าสู่ระบบที่หน้าเว็บนี้ แล้วใส่รหัส ตั้งหัวหน้าทีมได้ในตารางสมาชิก</p></div>` : ''}
+        <p class="muted">สร้างทีมแล้วเพิ่มลูกทีมด้วย "เพิ่มสมาชิกด้วยรหัสผู้ใช้" (ลูกทีมสมัครที่หน้าเว็บนี้ แล้วดูรหัสที่ ตั้งค่าส่วนตัว) ตั้งหัวหน้าทีมได้ในตารางสมาชิก</p></div>` : ''}
       ${teams.map(team => `<div class="panel team-card" style="--c:${team.color}">
         <div class="row"><h3><i class="team-dot"></i>${esc(team.name)}</h3><span class="muted">${peopleOf(team.id).length} คน</span><span class="grow"></span>
           ${(() => { const tp = progress([...T.assign.values()], stateOf, { today: t, team: team.id }); return tp.total ? `<span class="muted">งานที่มอบหมาย ${tp.done}/${tp.total} (${tp.pct}%)</span>` : ''; })()}
@@ -426,6 +426,11 @@ export async function createSurvey({ cloud, email, me, ui, office = false }) {
   const ROLE_TH = { viewer: 'ดูอย่างเดียว', editor: 'แก้ไขได้', admin: 'ผู้ดูแลระบบ' };
   async function renderProfile() {
     if (T.on && !T.profile) T.profile = (await cloud.rpc('llan_my_profile').catch(() => []))[0] || null;
+    // The name given when signing up goes with the code the first time.
+    const signupName = store.get('llan.joinName');
+    if (T.profile && !T.profile.name && !T.me.display_name && signupName) {
+      await cloud.rpc('llan_set_my_name', { p_name: signupName }).then(() => { T.profile.name = signupName; }).catch(() => {});
+    }
     const code = T.profile?.code || '', team = teamOf(T.me.team_id);
     const name = T.me.display_name || T.profile?.name || store.get('llan.joinName') || '';
     const waiting = T.on && !T.me.team_id && !isAdmin();

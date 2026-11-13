@@ -208,3 +208,44 @@ test('before the team SQL is run the page works as before', { skip: !findChrome(
     rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });
+
+test('sign up without any team code, find the user code in ตั้งค่าส่วนตัว, get added by the lead', { skip: !findChrome() && 'ไม่พบ Chrome', timeout: 120000 }, async () => {
+  const fake = fakeSupabase({ 'lead@test.local': 'editor' });
+  const sb = await listen(fake.server);
+  fake.t.llan_teams.set('T1', { id: 'T1', name: 'ทีมเหนือ', color: '#2f80ed', join_key: 'NORT-0001', created_at: new Date().toISOString() });
+  fake.info.set('lead@test.local', { team_id: 'T1', team_role: 'lead', display_name: 'หัวหน้า' });
+  const dist = mkdtempSync(path.join(tmpdir(), 'llan-signup-'));
+  execFileSync(process.execPath, [path.join(ROOT, 'scripts', 'build-web.mjs'), dist], { cwd: ROOT, env: { ...process.env, LLAN_SUPABASE_URL: sb, LLAN_SUPABASE_KEY: PUBLISHABLE }, stdio: 'ignore' });
+  const site = http.createServer((req, res) => {
+    const p = decodeURIComponent(new URL(req.url, 'http://x').pathname), file = path.join(dist, p === '/' ? 'index.html' : p);
+    if (!file.startsWith(dist) || !existsSync(file)) { res.writeHead(404); return res.end(); }
+    res.writeHead(200, { 'Content-Type': { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' }[path.extname(file)] || 'application/octet-stream' }); res.end(readFileSync(file));
+  });
+  const web = await listen(site, '127.0.0.3');
+  const port = 9420 + Math.floor(Math.random() * 30);
+  const profile = path.join(dist, '..', `llan-signup-chrome-${port}`);
+  const child = await launchChrome({ port, profileDir: profile, url: `${web}/`, headless: true });
+  try {
+    const p = await Page.attach((await listTargets(port)).find(t => t.url.startsWith(web)));
+    await p.waitReady(); await sleep(500);
+    const ev = js => p.eval(js);
+    const waitFor = async (js, ms = 10000) => { for (const end = Date.now() + ms; Date.now() < end; await sleep(150)) if (await ev(js)) return true; return false; };
+    await ev(`window.LLAN_TEAM_POLL = 1000; document.querySelector('#showSignup').click()`);
+    // Only e-mail, password and name: no team code when signing up.
+    assert.deepEqual(await ev(`[...document.querySelectorAll('#webSignup input')].map(i => i.id)`), ['sEmail', 'sPass', 'sName']);
+    await ev(`document.querySelector('#sEmail').value = 'fresh@test.local'; document.querySelector('#sPass').value = 'secret12'; document.querySelector('#sName').value = 'ช่างใหม่'; document.querySelector('#webSignup').requestSubmit()`);
+    assert.ok(await waitFor(`document.querySelector('#login').hidden && document.querySelector('#tab-profile').classList.contains('on') && /^U\\d{3}-/.test(document.querySelector('#myCode')?.textContent || '')`), 'in, with the code in ตั้งค่าส่วนตัว');
+    for (let i = 0; i < 30 && fake.codes.get('fresh@test.local')?.name !== 'ช่างใหม่'; i++) await sleep(150);
+    assert.equal(fake.codes.get('fresh@test.local').name, 'ช่างใหม่', 'the sign-up name goes with the code');
+    const code = await ev(`document.querySelector('#myCode').textContent`);
+    // The lead adds the new surveyor to their team with the code; the page reloads into the team.
+    await new Cloud({ url: sb, key: PUBLISHABLE, token: 'tok:lead@test.local' }).rpc('llan_add_by_code', { p_code: code, p_team_id: 'T1' });
+    await sleep(2500); await p.waitReady().catch(() => {});
+    assert.ok(await waitFor(`document.querySelector('#login').hidden && document.body.classList.contains('teams') && /ทีมเหนือ/.test(document.querySelector('#surveyChips').innerText)`, 15000), 'in the team');
+    assert.deepEqual([fake.info.get('fresh@test.local').team_id, fake.info.get('fresh@test.local').display_name], ['T1', 'ช่างใหม่']);
+  } finally {
+    child.kill(); site.close(); fake.server.close(); await sleep(400);
+    rmSync(dist, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});

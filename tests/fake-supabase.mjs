@@ -45,6 +45,12 @@ export function fakeSupabase(members = { 'admin@test.local': 'admin', 'editor@te
     const service = req.headers.apikey === SECRET;
     if (!service && req.headers.apikey !== PUBLISHABLE) return send(401, { message: 'Invalid API key' });
 
+    if (url.pathname === '/auth/v1/signup') {
+      const e = String(body?.email || '').toLowerCase();
+      if (state.signedUp?.has(e) || members[e]) return send(400, { msg: 'User already registered' });
+      state.signedUp = new Set([...(state.signedUp || []), e]);
+      return send(200, { access_token: `tok:${e}`, refresh_token: `ref:${e}`, expires_in: 3600, user: { email: e, user_metadata: body?.data || {} } });
+    }
     if (url.pathname === '/auth/v1/token') {
       if (url.searchParams.get('grant_type') === 'refresh_token') return send(200, { access_token: `tok:${body.refresh_token.slice(4)}`, refresh_token: body.refresh_token, expires_in: 3600, user: { email: body.refresh_token.slice(4) } });
       return body.password === PASSWORD ? send(200, { access_token: `tok:${body.email}`, refresh_token: `ref:${body.email}`, expires_in: 3600, user: { email: body.email } })
