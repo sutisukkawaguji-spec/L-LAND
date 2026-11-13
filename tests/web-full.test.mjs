@@ -26,6 +26,8 @@ test('github.io page: sign in, see the register from Supabase, save an edit', { 
   fake.t.llan_parcel_status.set('11E001', { id: '11E001', code: '11E001', status: 'fix', link: 'no-shape', ltax: 'found', pending: null,
     reasons: [{ level: 'fix', text: 'มีข้อมูลในทะเบียน แต่ยังไม่มีรูปแปลงบนแผนที่' }], info: { featureIds: [], landIds: ['L1'], areaDocWah: 100 }, rev: 1, updated_at: at });
   fake.t.llan_config.set('status_checked', { key: 'status_checked', value: at });
+  // A survey team; people join it with its key.
+  fake.t.llan_teams.set('T1', { id: 'T1', name: 'ทีมเหนือ', color: '#2f80ed', join_key: 'ABCD-1234', created_at: at });
 
   const dist = mkdtempSync(path.join(tmpdir(), 'llan-full-'));
   execFileSync(process.execPath, [path.join(ROOT, 'scripts', 'build-web.mjs'), dist], { cwd: ROOT, env: { ...process.env, LLAN_SUPABASE_URL: sb, LLAN_SUPABASE_KEY: PUBLISHABLE }, stdio: 'ignore' });
@@ -45,15 +47,35 @@ test('github.io page: sign in, see the register from Supabase, save an edit', { 
     await p.send('Emulation.setDeviceMetricsOverride', { width: 1300, height: 850, deviceScaleFactor: 1, mobile: false });
     await p.waitReady(); await sleep(1000);
     const ev = (js, o) => p.eval(js, o);
+    const waitFor = async (js, ms = 6000) => { for (const end = Date.now() + ms; Date.now() < end; await sleep(150)) if (await ev(js)) return true; return false; };
     const login = async (email, pass) => {
       await ev(`document.querySelector('#wEmail').value = ${JSON.stringify(email)}; document.querySelector('#wPass').value = ${JSON.stringify(pass)}; document.querySelector('#webLogin').requestSubmit()`);
-      for (let i = 0; i < 20; i++) { await sleep(250); if (await ev(`document.querySelector('#login').hidden || /สิทธิ์|ไม่ถูกต้อง/.test(document.querySelector('#loginState').textContent)`)) break; }
+      await waitFor(`document.querySelector('#login').hidden || !!document.querySelector('.join-screen') || /สิทธิ์|ไม่ถูกต้อง/.test(document.querySelector('#loginState').textContent)`);
     };
+    const join = async (key, name) => {
+      await ev(`{ const f = document.querySelector('#joinForm'); f.key.value = ${JSON.stringify(key)}; f.name.value = ${JSON.stringify(name)}; f.requestSubmit(); }`);
+      await waitFor(`!document.querySelector('.join-screen') || /ไม่ถูกต้อง/.test(document.querySelector('#joinState').textContent)`);
+    };
+    // Someone who is not a member is asked for a team key; a wrong key is refused.
     await login('stranger@test.local', PASSWORD);
-    assert.match(await ev(`document.querySelector('#loginState').textContent`), /ยังไม่ได้รับสิทธิ์/);
+    assert.equal(await ev(`!!document.querySelector('.join-screen')`), true);
+    assert.equal(await ev(`!!document.querySelector('.join-screen [data-skip]')`), false, 'non-members cannot skip');
+    await join('WRONG-KEY', 'คนแปลกหน้า');
+    assert.match(await ev(`document.querySelector('#joinState').textContent`), /รหัสทีมไม่ถูกต้อง/);
+    await ev(`document.querySelector('.join-screen [data-logout]').click()`);
+    await sleep(300);
+    // A member without a team joins with the key (any letter case) and starts working.
     await login('editor@test.local', PASSWORD);
-    assert.equal(await ev(`document.querySelector('#login').hidden`), true, await ev(`document.querySelector('#loginState').textContent`));
+    assert.equal(await ev(`!!document.querySelector('.join-screen [data-skip]')`), true);
+    await join('abcd-1234', 'ช่างเอ');
+    assert.ok(await waitFor(`document.querySelector('#login').hidden && !document.querySelector('.join-screen')`), await ev(`document.querySelector('#loginState').textContent`));
+    assert.equal(fake.info.get('editor@test.local').team_id, 'T1');
+    assert.equal(fake.info.get('editor@test.local').display_name, 'ช่างเอ');
     assert.match(await ev(`document.querySelector('#userChip').textContent`), /editor@test\.local/);
+    assert.ok(await waitFor(`/ทีมเหนือ/.test(document.querySelector('#surveyChips').textContent)`));
+    // Survey pages: my work, team, summary; the plan page is for team leads.
+    assert.equal(await ev(`document.querySelector('#tabs button[data-tab=mywork]').offsetParent !== null`), true);
+    assert.equal(await ev(`document.querySelector('#tabs button[data-tab=plan]').offsetParent === null`), true);
     // LTAX and settings are office-only.
     assert.equal(await ev(`document.querySelector('#tabs button[data-tab=ltax]').offsetParent === null`), true);
     assert.equal(await ev(`document.querySelector('#tabs button[data-tab=settings]').offsetParent === null`), true);
@@ -70,9 +92,13 @@ test('github.io page: sign in, see the register from Supabase, save an edit', { 
     for (let i = 0; i < 40 && !fake.t.llan_records.get('L1').data.survey; i++) await sleep(150);
     assert.equal(fake.t.llan_records.get('L1').data.survey?.state, 'done');
     assert.equal(fake.t.llan_records.get('L1').data.survey.note, 'ตรวจครบ');
+    assert.equal(fake.t.llan_records.get('L1').data.survey.team, 'T1', 'the mark carries the team');
+    const logged = () => [...fake.t.llan_work_log.values()].some(r => r.action === 'survey' && r.state === 'done' && r.code === '11E001' && r.by_user === 'editor@test.local' && r.team_id === 'T1');
+    for (let i = 0; i < 40 && !logged(); i++) await sleep(150);
+    assert.ok(logged(), 'the sign-off is in the work log for the daily summary');
     for (let i = 0; i < 20 && !/สำรวจเสร็จ รอลง LTAX/.test(await ev(`document.querySelector('#stSummary').textContent + document.querySelector('#stTable').textContent`)); i++) await sleep(150);
     assert.match(await ev(`document.querySelector('#stTable').textContent`), /สำรวจเสร็จ รอลง LTAX/);
-    assert.equal(await ev(`document.querySelector('#mapColor').value`), 'status');
+    assert.equal(await ev(`document.querySelector('#mapColor').value`), 'assign');
     await ev(`document.querySelector('#tabs button[data-tab=registry]').click()`);
     await sleep(500);
     assert.match(await ev(`document.querySelector('#tab-registry').textContent`), /สมชายเว็บ|11E001/);

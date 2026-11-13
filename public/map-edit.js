@@ -1,20 +1,28 @@
 // Map editing UI: draw parcels and buildings, reshape and delete shapes, snapping, GPS.
 // Every change to stored data asks for confirmation first.
 import { DrawTool } from './draw.js';
-import { areaM2, centroid, pointInGeom, fromWgs84, toMercator } from './shared/proj.mjs';
-import { minRect, nextBuildingCode, nextParcelCode, selfIntersects } from './shared/geom.mjs';
+import { areaM2, centroid, pointInGeom, fromWgs84, toMercator, fromMercator } from './shared/proj.mjs';
+import { minRect, nextBuildingCode, nextParcelCode, selfIntersects, splitRing } from './shared/geom.mjs';
 import { fromWah, formatNumber, formatRNW } from './shared/calc.mjs';
 
 const $ = s => document.querySelector(s);
-const MODE_TH = { parcel: 'วาดรูปแปลงที่ดิน', 'building-rect': 'วาดอาคารสี่เหลี่ยม (คลิก 2 มุมของด้านหนึ่ง แล้วคลิกด้านตรงข้าม)', 'building-poly': 'วาดอาคาร', edit: 'แก้ไขรูป: ลากจุดเพื่อย้าย แตะจุดเล็กกลางเส้นเพื่อเพิ่มจุด แตะจุดแล้วกด "ลบจุด"' };
+const MODE_TH = { parcel: 'วาดรูปแปลงที่ดิน', 'building-rect': 'วาดอาคารสี่เหลี่ยม (คลิก 2 มุมของด้านหนึ่ง แล้วคลิกด้านตรงข้าม)', 'building-poly': 'วาดอาคาร', edit: 'แก้ไขรูป: ลากจุดเพื่อย้าย แตะจุดเล็กกลางเส้นเพื่อเพิ่มจุด แตะจุดแล้วกด "ลบจุด"',
+  measure: 'วัดระยะและพื้นที่: แตะทีละจุด (ไม่บันทึกอะไร)', split: 'แบ่งแปลง: แตะจุดเริ่มนอกแปลง แล้วแตะจุดจบอีกด้านของแปลง', sign: 'ปักหมุดป้าย: แตะตำแหน่งที่ติดตั้งป้าย' };
 
-export function setupMapEditing({ map, S, api, esc, toast, guard, confirmBox, reloadAll, selectFeature, openEditor, ownerNames, onMultiTool }) {
+export function setupMapEditing({ map, S, api, esc, toast, guard, confirmBox, reloadAll, selectFeature, openEditor, ownerNames, onMultiTool, lockOf = () => null }) {
   const draw = new DrawTool(map, { onFinish: guard(finishShape), onEditSave: guard(saveReshape), onStatus: status });
+  let splitTarget = null;
 
   // ---------- toolbar ----------
   const setTool = async tool => {
     if (draw.dirty && !(await confirmBox('มีรูปที่วาดหรือแก้ค้างอยู่ ต้องการทิ้งหรือไม่?', { ok: 'ทิ้งรูปที่ค้าง', danger: true }))) return false;
     draw.stop();
+    if (tool === 'split') {
+      const f = map.selected;
+      if (!f || f.kind !== 'parcel') { toast('แตะเลือกแปลงที่จะแบ่งบนแผนที่ก่อน แล้วกด "แบ่งแปลง"', true); tool = 'select'; }
+      else if (lockOf(f.code)) { toast(`แปลง ${f.code}: ${lockOf(f.code).reason} แบ่งไม่ได้`, true); tool = 'select'; }
+      else splitTarget = f;
+    }
     if (tool === 'multi') onMultiTool?.();
     else if (tool !== 'select') {
       if (!S.layers.length && !(await confirmBox('ยังไม่มีชั้นแผนที่ L-LAN จะสร้างชั้นใหม่ให้เมื่อบันทึกรูปแรก ทำต่อหรือไม่?'))) return false;
@@ -33,6 +41,7 @@ export function setupMapEditing({ map, S, api, esc, toast, guard, confirmBox, re
     if (b.dataset.tool) await setTool(b.dataset.tool);
     else if (b.id === 'snapBtn') { draw.snapOn = !draw.snapOn; b.classList.toggle('on', draw.snapOn); toast(draw.snapOn ? 'เปิด Snap: จุดจะดูดติดจุดและเส้นของรูปข้างเคียง' : 'ปิด Snap'); }
     else if (b.id === 'gpsBtn') toggleGps(b);
+    else if (b.id === 'addMenuBtn') toggleAddMenu(b);
     else if (b.id === 'zoomIn') map.zoomBy(0.6);
     else if (b.id === 'zoomOut') map.zoomBy(1 / 0.6);
     else if (b.id === 'zoomFit') map.fit(S.features.filter(f => f.kind === 'parcel').length ? map.layers.flatMap(l => l.features).filter(f => f.kind === 'parcel') : map.layers.flatMap(l => l.features));
@@ -43,7 +52,8 @@ export function setupMapEditing({ map, S, api, esc, toast, guard, confirmBox, re
     bar.hidden = !st;
     if (!st) return;
     const area = st.areaM2 ? ` · พื้นที่ ${formatNumber(st.areaM2)} ตร.ม. (${formatRNW(...Object.values(fromWah(st.areaM2 / 4)))} ไร่-งาน-วา)` : '';
-    $('#drawStatus').innerHTML = `<b>${esc(MODE_TH[st.mode])}</b><br>${st.points} จุด${area}${st.crossing ? ' · <span class="pill err">เส้นตัดกัน</span>' : ''}`;
+    const len = st.mode === 'measure' && st.points > 1 ? ` · ระยะ ${formatNumber(st.lengthM)} ม.${st.perimeterM ? ` · รอบรูป ${formatNumber(st.perimeterM)} ม.` : ''}` : '';
+    $('#drawStatus').innerHTML = `<b>${esc(MODE_TH[st.mode])}</b><br>${st.points} จุด${len}${area}${st.crossing ? ' · <span class="pill err">เส้นตัดกัน</span>' : ''}`;
     $('#drawUndo').disabled = !st.canUndo;
     $('#drawFinish').disabled = !st.canFinish;
     $('#drawFinish').textContent = st.mode === 'edit' ? '✓ บันทึกรูป' : '✓ เสร็จ';
@@ -113,7 +123,10 @@ export function setupMapEditing({ map, S, api, esc, toast, guard, confirmBox, re
     });
   }
 
-  async function finishShape(mode, geometry) {
+  async function finishShape(mode, geometry, info) {
+    if (mode === 'measure') return measured(info);
+    if (mode === 'split') return splitParcel(geometry);
+    if (mode === 'sign') return placeSign(geometry);
     const ring = geometry.coordinates[0].slice(0, -1);
     if (selfIntersects(ring) && !(await confirmBox('เส้นของรูปตัดกันเอง พื้นที่อาจคำนวณผิด ต้องการใช้รูปนี้ต่อหรือไม่?', { ok: 'ใช้ต่อ', danger: true }))) return;
     const area = areaM2(geometry);
@@ -184,6 +197,77 @@ export function setupMapEditing({ map, S, api, esc, toast, guard, confirmBox, re
     else toast('บันทึกรูปอาคารแล้ว');
   }
 
+  // ---------- measure, split a parcel, place a sign ----------
+  async function measured(info) {
+    const rnw = fromWah((info.areaM2 || 0) / 4);
+    await confirmBox(`<h3>ผลการวัด</h3><dl class="kv"><dt>ระยะตามเส้น</dt><dd><b>${formatNumber(info.lengthM)}</b> ม.</dd>
+      ${info.areaM2 ? `<dt>รอบรูป</dt><dd>${formatNumber(info.perimeterM)} ม.</dd><dt>พื้นที่</dt><dd><b>${formatNumber(info.areaM2)}</b> ตร.ม. · ${formatNumber(info.areaM2 / 4)} ตร.ว. (${formatRNW(rnw.rai, rnw.ngan, rnw.wah)} ไร่-งาน-วา)</dd>` : ''}</dl>
+      <span class="muted">วัดบนแผนที่ ใช้ประกอบการสำรวจ ไม่ใช่การรังวัด</span>`, { ok: 'ปิด' });
+    resetTool();
+  }
+
+  async function splitParcel(line) {
+    const f = splitTarget;
+    if (!f) { resetTool(); return toast('แตะเลือกแปลงที่จะแบ่งก่อน', true); }
+    const g = f._mgeom;
+    if (g.type !== 'Polygon' || g.coordinates.length > 1) { resetTool(); return toast('แบ่งได้เฉพาะรูปแปลงชิ้นเดียวที่ไม่มีรูกลวง', true); }
+    const r = splitRing(g.coordinates[0].slice(0, -1), line.mercator[0], line.mercator[1]);
+    if (r.error) { draw.undo(); draw.undo(); return toast(`${r.error} ลองลากเส้นใหม่`, true); }
+    const toGeo = part => ({ type: 'Polygon', coordinates: [[...part, part[0]].map(([x, y]) => fromMercator(x, y))] });
+    let [A, B] = r.parts.map(toGeo), aA = areaM2(A), aB = areaM2(B);
+    if (aB > aA) { [A, B] = [B, A]; [aA, aB] = [aB, aA]; }
+    const suggestion = nextParcelCode(f.code, allCodes());
+    const res = await shapeDialog(`<h3>แบ่งแปลง ${esc(f.code)}</h3>
+      <p>ส่วนที่ใหญ่กว่า <b>${formatNumber(aA / 4)} ตร.ว.</b> ใช้รหัสเดิม <b>${esc(f.code)}</b></p>
+      <p>ส่วนที่แบ่งออก <b>${formatNumber(aB / 4)} ตร.ว.</b></p>
+      <div class="form-row"><label>รหัสแปลงของส่วนที่แบ่งออก</label><input name="code" value="${esc(suggestion)}" required></div>
+      <label class="check"><input type="checkbox" name="create" checked> สร้างข้อมูลที่ดินของส่วนที่แบ่งออก (เจ้าของ หมู่ ตำบล จากแปลงเดิม เนื้อที่จากรูป)</label>
+      <p class="muted">เนื้อที่ในทะเบียนของแปลงเดิมไม่เปลี่ยนเอง ให้แก้ตามเอกสารสิทธิ์</p>
+      <div class="row end"><button value="cancel" formnovalidate>ยกเลิก</button><button value="save" class="primary">แบ่งแปลง</button></div>`);
+    if (!res) return resetTool();
+    const code = res.code.toUpperCase();
+    if (!code) return toast('ใส่รหัสแปลงของส่วนที่แบ่งออก', true);
+    if (S.featByCode.has(code) && !(await confirmBox(`มีรูปแปลงรหัส <b>${esc(code)}</b> แล้ว ต้องการบันทึกซ้ำหรือไม่?`, { ok: 'บันทึกซ้ำ', danger: true }))) return;
+    await api('PUT', `/api/features/${f.id}`, { geometry: A });
+    const nf = await api('POST', '/api/features', { kind: 'parcel', code, geometry: B, layerId: f.layerId });
+    resetTool(); splitTarget = null;
+    await reloadAll(); selectFeature(nf.id);
+    const land0 = S.landByCode.get(String(f.code).toUpperCase()), rnw = fromWah(aB / 4);
+    if (res.create && !S.landByCode.get(code)) openEditor('lands', null, { parcelCode: code, rai: String(rnw.rai), ngan: String(rnw.ngan), wah: String(rnw.wah),
+      docType: land0?.docType || '', amphur: land0?.amphur || S.settings.amphur || '', district: land0?.district || '', villageNo: land0?.villageNo || '',
+      ownerIds: [...(land0?.ownerIds || [])], uses: [] });
+    else toast(`แบ่งแปลงแล้ว: ${f.code} และ ${code}`);
+  }
+
+  async function placeSign(point) {
+    resetTool();
+    const [lon, lat] = point.coordinates;
+    const parcel = parcelAt([lon, lat]), land = parcel && S.landByCode.get(String(parcel.code).toUpperCase());
+    if (parcel && lockOf(parcel.code)) return toast(`แปลง ${parcel.code}: ${lockOf(parcel.code).reason}`, true);
+    openEditor('signboards', null, { loc: { lat: Math.round(lat * 1e7) / 1e7, lon: Math.round(lon * 1e7) / 1e7 }, landId: land?.id || '', ownerIds: [...(land?.ownerIds || [])],
+      villageNo: land?.villageNo || '', noSide: '1', unit: '1' });
+    toast(parcel ? `ป้ายในแปลง ${parcel.code}: กรอกข้อมูลป้ายแล้วกดบันทึก` : 'ป้ายนี้ไม่อยู่ในรูปแปลงใด กรอกข้อมูลป้ายแล้วกดบันทึก');
+  }
+
+  // Quick add: records without a shape.
+  function toggleAddMenu(btn) {
+    let m = $('#addMenu');
+    if (m) { m.remove(); return; }
+    m = Object.assign(document.createElement('div'), { id: 'addMenu', className: 'add-menu' });
+    m.innerHTML = `<button data-add="owners">👤 เจ้าของทรัพย์สินใหม่</button><button data-add="lands">▦ ที่ดินใหม่ (ยังไม่มีรูป)</button>
+      <button data-add="buildings">⌂ สิ่งปลูกสร้างใหม่ (ยังไม่มีรูป)</button><button data-add="sign">📍 ป้ายใหม่ (ปักหมุดบนแผนที่)</button>
+      <button data-add="parcel">⬠ วาดแปลงใหม่</button><button data-add="building-rect">▭ วาดอาคารใหม่</button>`;
+    btn.closest('.map-wrap').append(m);
+    m.addEventListener('click', guard(async e => {
+      const a = e.target.closest('[data-add]')?.dataset.add; if (!a) return;
+      m.remove();
+      if (a === 'owners') openEditor('owners', null, { personType: 'บุคคลธรรมดา' });
+      else if (a === 'lands') openEditor('lands', null, { amphur: S.settings.amphur || '', ownerIds: [], uses: [] });
+      else if (a === 'buildings') openEditor('buildings', null, { ownerIds: [], landIds: [], uses: [] });
+      else await setTool(a);
+    }));
+  }
+
   // ---------- reshape / delete ----------
   async function saveReshape(feature, geometry) {
     const before = feature.areaM2 || 0, after = areaM2(geometry);
@@ -192,7 +276,6 @@ export function setupMapEditing({ map, S, api, esc, toast, guard, confirmBox, re
     if (!(await confirmBox(`บันทึกการแก้รูป <b>${esc(feature.code || '(ไม่มีรหัส)')}</b>?<br>พื้นที่ ${formatNumber(before)} → <b>${formatNumber(after)}</b> ตร.ม. (${formatNumber(before / 4)} → ${formatNumber(after / 4)} ตร.ว.)${warn}`, { ok: 'บันทึกรูป' }))) return;
     const saved = await api('PUT', `/api/features/${feature.id}`, { geometry });
     if (saved.cloudWarning) toast(saved.cloudWarning, true);
-    if (f.cloudWarning) toast(f.cloudWarning, true);
     resetTool();
     toast('บันทึกรูปแล้ว');
     await reloadAll(); selectFeature(feature.id);

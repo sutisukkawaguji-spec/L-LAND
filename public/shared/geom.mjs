@@ -59,6 +59,34 @@ export function ringArea(ring) {
 }
 
 // True when two non-adjacent edges of the (open) ring cross.
+// Where segments a-b and p-q cross: t along a-b, u along p-q (u in [0, 1) so a shared vertex counts once).
+function crossing(a, b, p, q) {
+  const r = [b[0] - a[0], b[1] - a[1]], s = [q[0] - p[0], q[1] - p[1]];
+  const d = r[0] * s[1] - r[1] * s[0];
+  if (Math.abs(d) < 1e-12) return null;
+  const w = [p[0] - a[0], p[1] - a[1]];
+  const t = (w[0] * s[1] - w[1] * s[0]) / d, u = (w[0] * r[1] - w[1] * r[0]) / d;
+  return t >= 0 && t <= 1 && u >= 0 && u < 1 ? { t, u, pt: [a[0] + t * r[0], a[1] + t * r[1]] } : null;
+}
+// Cut a polygon ring (open: last point not repeated) with the segment a-b into two rings.
+// → { parts: [ringA, ringB] } or { error } (the cut must cross the boundary exactly twice).
+export function splitRing(ring, a, b) {
+  const hits = [];
+  for (let i = 0; i < ring.length; i++) {
+    const x = crossing(a, b, ring[i], ring[(i + 1) % ring.length]);
+    if (x) hits.push({ i, ...x });
+  }
+  if (hits.length < 2) return { error: 'เส้นตัดต้องลากผ่านขอบแปลงทั้งสองด้าน (เริ่มและจบนอกแปลง)' };
+  if (hits.length > 2) return { error: `เส้นตัดผ่านขอบแปลง ${hits.length} จุด ลากใหม่ให้ผ่านขอบแปลง 2 จุดพอดี` };
+  hits.sort((h, k) => h.i - k.i || h.u - k.u);
+  const [h0, h1] = hits;
+  if (h0.i === h1.i) return { error: 'เส้นตัดไม่ได้แบ่งแปลงออกเป็น 2 ส่วน' };
+  const A = [h0.pt, ...ring.slice(h0.i + 1, h1.i + 1), h1.pt];
+  const B = [h1.pt, ...ring.slice(h1.i + 1), ...ring.slice(0, h0.i + 1), h0.pt];
+  if (A.length < 3 || B.length < 3 || ringArea(A) < 1e-6 || ringArea(B) < 1e-6) return { error: 'ส่วนที่แบ่งเล็กเกินไป' };
+  return { parts: [A, B] };
+}
+
 export function selfIntersects(ring) {
   const n = ring.length;
   const orient = (a, b, c) => Math.sign((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]));

@@ -152,7 +152,7 @@ route('POST', '/api/parcel-status/publish', () => publisher.publish({ all: true 
 // Send what is waiting and take in what was changed on the web.
 route('POST', '/api/cloud/sync', () => { needSecret(); return sync.sync(); });
 route('GET', '/api/cloud/schema', async () => ({
-  sql: (await Promise.all(['schema.sql', 'web-access.sql', 'records.sql'].map(f => readFile(path.join(ROOT, 'supabase', f), 'utf8')))).join('\n\n'),
+  sql: (await Promise.all(['schema.sql', 'web-access.sql', 'records.sql', 'team.sql'].map(f => readFile(path.join(ROOT, 'supabase', f), 'utf8')))).join('\n\n'),
 }));
 
 route('GET', '/api/jobs/:id/report', ({ id }) => {

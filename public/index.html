@@ -12,14 +12,20 @@
     <div class="brand"><img src="icon.svg" alt=""><b>L-LAN</b><span class="sub">จัดการข้อมูลภาษีที่ดินและสิ่งปลูกสร้าง</span></div>
     <nav class="tabs" id="tabs">
       <button data-tab="map" class="on">แผนที่</button>
+      <button data-tab="mywork" class="web-only teams-only">งานของฉัน</button>
       <button data-tab="status">สถานะแปลง <span class="badge" id="badgeFix"></span></button>
+      <button data-tab="team" class="web-only teams-only">ทีม</button>
+      <button data-tab="summary" class="web-only teams-only">สรุปงาน</button>
+      <button data-tab="plan" class="web-only lead-only">แผนงาน</button>
       <button data-tab="registry">ทะเบียน</button>
       <button data-tab="checks">ตรวจสอบ <span class="badge" id="badgeErrors"></span></button>
       <button data-tab="changes">สรุปการแก้ไข <span class="badge" id="badgePending"></span></button>
       <button data-tab="ltax" class="local-only">ส่งเข้า LTAX <span class="badge" id="badgeReady" title="แปลงที่สำรวจเสร็จ รอลง LTAX"></span></button>
       <button data-tab="data">นำเข้า / ส่งออก</button>
       <button data-tab="settings" class="local-only">ตั้งค่า</button>
+      <button class="web-only nav-more" id="navMore" type="button">เพิ่มเติม</button>
     </nav>
+    <div class="survey-chips web-only" id="surveyChips"></div>
     <button class="job-chip" id="jobChip" hidden onclick="document.querySelector(&quot;#tabs button[data-tab=ltax]&quot;).click()"></button>
     <div class="ltax-chip local-only" id="ltaxChip" title="สถานะการเชื่อมต่อ LTAX ONLINE">LTAX: -</div>
     <div class="user-chip" id="userChip"></div>
@@ -53,6 +59,7 @@
               <select id="mapColor">
                 <option value="status">สถานะแปลง (ระบบกลาง)</option>
                 <option value="survey">ความคืบหน้าการสำรวจ</option>
+                <option value="assign" class="web-only">งานที่มอบหมาย (ทีมสำรวจ)</option>
                 <option value="link">การเชื่อมต่อข้อมูล</option>
                 <option value="saved">สถานะบันทึกเข้า LTAX</option>
                 <option value="join">การจอยกับทะเบียน</option>
@@ -80,6 +87,10 @@
           <button data-tool="parcel" title="วาดรูปแปลงที่ดิน: คลิกทีละมุม ดับเบิลคลิกหรือกดเสร็จเพื่อจบ">⬠<span>วาดแปลง</span></button>
           <button data-tool="building-rect" title="วาดอาคารสี่เหลี่ยม: คลิกมุม 2 จุดของด้านหนึ่ง แล้วคลิกด้านตรงข้าม">▭<span>อาคาร 3 จุด</span></button>
           <button data-tool="building-poly" title="วาดอาคารหลายเหลี่ยม">⬡<span>อาคารอิสระ</span></button>
+          <button data-tool="split" class="edit-only" title="แบ่งแปลง: เลือกแปลงก่อน แล้วลากเส้นตัดจากนอกแปลงข้ามไปอีกด้าน">✂<span>แบ่งแปลง</span></button>
+          <button data-tool="sign" class="edit-only" title="ปักหมุดป้าย: แตะตำแหน่งป้ายบนแผนที่ แล้วกรอกข้อมูลป้าย">📍<span>ปักป้าย</span></button>
+          <button data-tool="measure" title="วัดระยะและพื้นที่ (ไม่บันทึก)">📏<span>วัดระยะ</span></button>
+          <button id="addMenuBtn" class="edit-only" title="เพิ่มข้อมูลใหม่: เจ้าของ ที่ดิน สิ่งปลูกสร้าง ป้าย">＋<span>เพิ่มข้อมูล</span></button>
           <hr>
           <button id="snapBtn" class="on" title="ดูดติดจุดและเส้นของรูปข้างเคียง">🧲<span>Snap</span></button>
           <button id="gpsBtn" title="แสดงตำแหน่งของฉันจาก GPS">◎<span>GPS</span></button>
@@ -226,6 +237,21 @@
 
     <!-- นำเข้า / ส่งออก -->
     <section class="tab" id="tab-data">
+      <div class="panel">
+        <h3>ตารางแบบฟอร์ม LTAX (Excel)</h3>
+        <p class="muted">ตารางตามหน้าบันทึกข้อมูลของ LTAX ONLINE ครบทุกช่อง: เจ้าของ · ที่ดิน · การใช้ประโยชน์ที่ดิน · สิ่งปลูกสร้าง · การใช้ประโยชน์อาคาร · ป้าย
+          ช่องที่มีตัวเลือกเลือกจากลูกศรในช่องได้ กรอกหรือแก้ใน Excel แล้วนำกลับเข้ามา รายการที่เปลี่ยนจะไปรอส่งเข้า LTAX</p>
+        <div class="row wrap">
+          <label>ส่งออก <select id="tblScope"><option value="all">ข้อมูลทั้งหมด</option><option value="pending">เฉพาะที่รอส่ง LTAX</option><option value="blank">แบบฟอร์มเปล่า (ไว้กรอกรายการใหม่)</option></select></label>
+          <a class="button primary" id="tblExport" href="/api/export/ltax-table?scope=all">ส่งออกตาราง</a>
+        </div>
+        <div class="row wrap edit-only">
+          <label>นำเข้า <input type="file" id="tblFile" accept=".xlsx"></label>
+          <button id="tblPreview">ตรวจไฟล์ก่อน</button><button id="tblImport" class="primary">นำเข้า</button>
+          <button id="tblSend" class="local-only" hidden>ส่งรายการที่นำเข้าเข้า LTAX…</button>
+        </div>
+        <div id="tblResult" class="result"></div>
+      </div>
       <div class="ltax-grid">
         <div class="panel local-only">
           <h3>นำเข้า Excel ที่ส่งออกจาก LTAX ONLINE</h3>
@@ -301,6 +327,10 @@
       <div class="row"><button id="setSave" class="primary">บันทึกการตั้งค่า</button><span id="setMsg" class="muted"></span></div>
       <p class="muted" id="dataDir"></p>
     </section>
+    <section class="tab web-only" id="tab-mywork"></section>
+    <section class="tab web-only" id="tab-team"></section>
+    <section class="tab web-only" id="tab-summary"></section>
+    <section class="tab web-only" id="tab-plan"></section>
   </main>
 
   <dialog id="editor" class="editor"><form method="dialog" id="editorForm"></form></dialog>

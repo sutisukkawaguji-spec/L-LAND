@@ -9,7 +9,7 @@ const TILE_SOURCES = {
 const WORLD = 2 * Math.PI * 6378137;
 
 export class MapView {
-  constructor(canvas, { onSelect, onHover } = {}) {
+  constructor(canvas, { onSelect, onHover, onMarker } = {}) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.layers = [];
@@ -18,7 +18,9 @@ export class MapView {
     this.basemap = 'none';
     this.tiles = new Map();
     this.selected = null;
-    this.onSelect = onSelect; this.onHover = onHover;
+    this.onSelect = onSelect; this.onHover = onHover; this.onMarker = onMarker;
+    // Points drawn over the shapes: { lon, lat, kind: 'person' | 'sign', label, sub, color, faded, data }
+    this.markers = [];
     this.#bind();
     new ResizeObserver(() => this.resize()).observe(canvas.parentElement);
     this.resize();
@@ -102,6 +104,7 @@ export class MapView {
       for (const f of this.multi) if (f._path) ctx.stroke(f._path);
     }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this.#drawMarkers();
     this.#drawGps();
     this.drawOverlay?.(ctx, this);
     // Labels when zoomed in enough
@@ -150,6 +153,48 @@ export class MapView {
     }
     this.ctx.font = '10px Tahoma, sans-serif'; this.ctx.fillStyle = 'rgba(0,0,0,.6)'; this.ctx.textAlign = 'right';
     this.ctx.fillText(src.credit, this.w - 6, this.h - 6);
+  }
+
+  #drawMarkers() {
+    const { ctx } = this;
+    const view = (x, y) => x > -40 && y > -40 && x < this.w + 40 && y < this.h + 40;
+    // Signs only when zoomed in; people always.
+    for (const m of this.markers) {
+      if (m.kind === 'sign' && this.res > 2) continue;
+      const [x, y] = this.toScreen(toMercator(m.lon, m.lat));
+      if (!view(x, y)) continue;
+      m._sx = x; m._sy = y;
+      ctx.globalAlpha = m.faded ? 0.45 : 1;
+      if (m.kind === 'sign') {
+        ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x - 7, y - 12); ctx.lineTo(x + 7, y - 12); ctx.closePath();
+        ctx.fillStyle = m.color || '#8e44ad'; ctx.fill();
+        ctx.fillRect(x - 9, y - 26, 18, 14); ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.strokeRect(x - 9, y - 26, 18, 14);
+        ctx.fillStyle = '#fff'; ctx.font = 'bold 10px Tahoma, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('ป', x, y - 19);
+      } else {
+        ctx.beginPath(); ctx.arc(x, y, 13, 0, Math.PI * 2);
+        ctx.fillStyle = m.color || '#2f80ed'; ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; ctx.stroke();
+        ctx.fillStyle = '#fff'; ctx.font = 'bold 12px "Leelawadee UI", Tahoma, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText((m.initials || m.label || '?').slice(0, 2), x, y + 0.5);
+        if (m.label) {
+          const text = m.sub ? `${m.label} · ${m.sub}` : m.label;
+          ctx.font = '12px "Leelawadee UI", Tahoma, sans-serif';
+          const w = ctx.measureText(text).width + 12;
+          ctx.fillStyle = 'rgba(29,39,51,.85)'; roundRect(ctx, x - w / 2, y + 16, w, 20, 10); ctx.fill();
+          ctx.fillStyle = '#fff'; ctx.fillText(text, x, y + 26);
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
+  }
+  // The marker under a screen point (people first).
+  pickMarker(sx, sy) {
+    let best = null, bd = 18;
+    for (const m of this.markers) {
+      if (m._sx === undefined || (m.kind === 'sign' && this.res > 2)) continue;
+      const d = Math.hypot(m._sx - sx, (m.kind === 'sign' ? m._sy - 18 : m._sy) - sy);
+      if (d < bd) { bd = d; best = m; }
+    }
+    return best;
   }
 
   #drawGps() {
@@ -249,7 +294,9 @@ export class MapView {
       if (owned) { this.tool.up?.(at(e), e); owned = false; return; }
       if (drag && !moved && e.type === 'pointerup') {
         const p = at(e);
-        if (!this.tool?.click?.(p, e)) {
+        const mk = !this.tool && this.onMarker && this.pickMarker(...p.screen);
+        if (mk) this.onMarker(mk);
+        else if (!this.tool?.click?.(p, e)) {
           const hit = this.pick(...p.screen);
           this.selected = hit?.feature || null;
           this.draw();
@@ -272,6 +319,11 @@ export class MapView {
       this.draw();
     }, { passive: false });
   }
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
 }
 
 // Mercator path, bbox and label point, cached on the feature.

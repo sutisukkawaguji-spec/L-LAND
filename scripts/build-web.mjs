@@ -17,7 +17,7 @@ for (const f of walk('public')) copy(f, f.slice('public/'.length));
 copy('web/index.html', 'map.html');
 copy('web/web.js', 'web.js');
 // The shared data API and the Supabase store run in the browser on the web (lib/ → /lib, shared → /shared).
-const BROWSER_LIB = ['core-api', 'cloud', 'cloud-store', 'parcel-status', 'layers', 'import-ltax', 'xlsx', 'export-xlsx', 'registry-ops', 'shapefile', 'cp874'];
+const BROWSER_LIB = ['core-api', 'cloud', 'cloud-store', 'parcel-status', 'ltax-table', 'team', 'layers', 'import-ltax', 'xlsx', 'export-xlsx', 'registry-ops', 'shapefile', 'cp874'];
 mkdirSync(path.join(OUT, 'lib'), { recursive: true });
 for (const name of BROWSER_LIB) {
   const text = readFileSync(path.join(ROOT, 'lib', `${name}.mjs`), 'utf8');

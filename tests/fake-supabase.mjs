@@ -8,8 +8,13 @@ export const PASSWORD = 'pass1234';
 // Columns of tables whose rows the office builds itself (supabase/records.sql).
 const COLUMNS = { llan_parcel_status: ['id', 'code', 'status', 'link', 'ltax', 'pending', 'reasons', 'info', 'rev', 'updated_at', 'updated_by'] };
 
-export function fakeSupabase(members = { 'admin@test.local': 'admin', 'editor@test.local': 'editor', 'viewer@test.local': 'viewer' }) {
-  const t = { llan_records: new Map(), llan_features: new Map(), llan_layers: new Map(), llan_deleted: new Map(), llan_change_log: new Map(), llan_config: new Map(), llan_feature_log: new Map(), llan_parcel_status: new Map() };
+export function fakeSupabase(members = { 'admin@test.local': 'admin', 'editor@test.local': 'editor', 'viewer@test.local': 'viewer' }, { teams = true } = {}) {
+  const t = { llan_records: new Map(), llan_features: new Map(), llan_layers: new Map(), llan_deleted: new Map(), llan_change_log: new Map(), llan_config: new Map(), llan_feature_log: new Map(), llan_parcel_status: new Map(),
+    llan_teams: new Map(), llan_locations: new Map(), llan_work_log: new Map(), llan_plans: new Map(), llan_assignments: new Map() };
+  // Team of each member (supabase/team.sql): email → { team_id, team_role, display_name }
+  const info = new Map();
+  let keySeq = 0;
+  const newKey = () => `KEY${String(++keySeq).padStart(2, '0')}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
   let serial = 0, last = 0;
   const now = () => { let ms = Date.now(); if (ms <= last) ms = last + 1; last = ms; return new Date(ms).toISOString(); };
   const STAMPED = new Set(['llan_records', 'llan_features', 'llan_layers', 'llan_parcel_status']);
@@ -90,10 +95,50 @@ export function fakeSupabase(members = { 'admin@test.local': 'admin', 'editor@te
       }
       return send(200, out);
     }
+    const myTeam = email ? info.get(email)?.team_id || null : null;
+    const isLead = team => service || role === 'admin' || (!!team && myTeam === team && info.get(email)?.team_role === 'lead');
+    const TEAM_TABLES = ['llan_teams', 'llan_locations', 'llan_work_log', 'llan_plans', 'llan_assignments'];
+    if (!teams && (TEAM_TABLES.includes(name) || name.startsWith('rpc/llan_team') || name === 'rpc/llan_join_team' || name === 'rpc/llan_member_set'))
+      return send(404, { code: 'PGRST205', message: `Could not find the table 'public.${name}' in the schema cache` });
+    const raise = (code, message) => send(400, { code, message });
     if (name === 'llan_members') {
+      const sel = url.searchParams.get('select') || '*';
+      if (!teams && /team_id|team_role|display_name/.test(sel)) return send(400, { code: '42703', message: 'column llan_members.team_id does not exist' });
       const want = decodeURIComponent((url.searchParams.get('email') || '').replace(/^eq\./, ''));
-      const visible = service || want === email || role === 'admin';
-      return send(200, visible && members[want] ? [{ role: members[want] }] : []);
+      const row = e => ({ email: e, role: members[e], team_id: info.get(e)?.team_id || null, team_role: info.get(e)?.team_role || 'member', display_name: info.get(e)?.display_name || null });
+      const visible = e => service || e === email || role === 'admin' || (myTeam && info.get(e)?.team_id === myTeam);
+      const list = Object.keys(members).filter(e => (!want || e === want) && visible(e)).map(row);
+      return send(200, sel === 'role' ? list.map(r => ({ role: r.role })) : list);
+    }
+    if (name === 'rpc/llan_join_team') {
+      if (!email) return raise('P0001', 'กรุณาเข้าสู่ระบบก่อน');
+      const team = [...t.llan_teams.values()].find(x => x.join_key.toUpperCase() === String(body.p_key || '').trim().toUpperCase());
+      if (!team) return raise('22023', 'รหัสทีมไม่ถูกต้อง');
+      if (!members[email]) members[email] = 'editor';
+      const old = info.get(email);
+      info.set(email, { team_id: team.id, team_role: old?.team_id === team.id ? old.team_role : 'member', display_name: String(body.p_name || '').trim() || old?.display_name || null });
+      return send(200, [{ team_id: team.id, team_name: team.name, role: members[email], team_role: info.get(email).team_role }]);
+    }
+    if (name === 'rpc/llan_team_save') {
+      if (role !== 'admin') return raise('42501', 'เฉพาะผู้ดูแลระบบสร้างหรือแก้ทีมได้');
+      const id = body.p_id || `team-${t.llan_teams.size + 1}`;
+      const old = t.llan_teams.get(id);
+      const row = { id, name: String(body.p_name).trim(), color: body.p_color || old?.color || '#2f80ed', join_key: old?.join_key || newKey(), created_at: old?.created_at || now(), created_by: email };
+      t.llan_teams.set(id, row);
+      return send(200, [row]);
+    }
+    if (name === 'rpc/llan_team_delete') { if (role !== 'admin') return raise('42501', 'เฉพาะผู้ดูแลระบบลบทีมได้'); t.llan_teams.delete(body.p_id); return send(200, null); }
+    if (name === 'rpc/llan_team_keys') return send(200, [...t.llan_teams.values()].filter(x => isLead(x.id)).map(({ id, name: n, color, join_key }) => ({ id, name: n, color, join_key })));
+    if (name === 'rpc/llan_team_new_key') {
+      if (!isLead(body.p_id)) return raise('42501', 'เฉพาะผู้ดูแลหรือหัวหน้าทีมเปลี่ยนรหัสทีมได้');
+      const tm = t.llan_teams.get(body.p_id); tm.join_key = newKey(); return send(200, tm.join_key);
+    }
+    if (name === 'rpc/llan_member_set') {
+      if (role !== 'admin') return raise('42501', 'เฉพาะผู้ดูแลระบบจัดการสมาชิกได้');
+      const e = String(body.p_email).toLowerCase(), old = info.get(e) || {};
+      info.set(e, { team_id: body.p_team_id === '' ? null : body.p_team_id ?? old.team_id ?? null, team_role: body.p_team_role || old.team_role || 'member', display_name: body.p_name || old.display_name || null });
+      if (body.p_role) members[e] = body.p_role;
+      return send(200, null);
     }
     const table = t[name];
     if (!table) return send(404, { code: 'PGRST205', message: `Could not find the table 'public.${name}' in the schema cache` });
@@ -103,19 +148,55 @@ export function fakeSupabase(members = { 'admin@test.local': 'admin', 'editor@te
     const match = r => filters.every(([k, v]) => {
       if (v.startsWith('eq.')) return String(r[k]) === v.slice(3);
       if (v.startsWith('gt.')) return r[k] != null && cmp(r[k], v.slice(3)) > 0;
+      if (v.startsWith('gte.')) return r[k] != null && cmp(r[k], v.slice(4)) >= 0;
+      if (v.startsWith('lte.')) return r[k] != null && cmp(r[k], v.slice(4)) <= 0;
       if (v.startsWith('in.(')) return v.slice(4, -1).split(',').map(x => decodeURIComponent(x.replace(/^"|"$/g, ''))).includes(String(r[k]));
       return true;
     });
 
+    // Row visibility of the team tables (as the policies in team.sql)
+    const canSee = r => {
+      if (name === 'llan_locations') return service || role === 'admin' || r.email === email || isLead(r.team_id);
+      if (name === 'llan_work_log') return service || role === 'admin' || r.by_user === email || isLead(r.team_id);
+      return true;
+    };
     if (req.method === 'GET') {
       if (!role) return send(200, []);
       if (name === 'llan_config' && !service && !role) return send(200, []);
-      let rows = [...table.values()].filter(match);
+      let rows = [...table.values()].filter(match).filter(canSee);
+      if (name === 'llan_teams') rows = rows.map(({ join_key, ...r }) => r);
       const order = (url.searchParams.get('order') || 'id').split(',').map(o => o.split('.'));
       rows.sort((a, b) => { for (const [k, dir] of order) { const c = cmp(a[k] ?? '', b[k] ?? ''); if (c) return dir === 'desc' ? -c : c; } return 0; });
       if (url.searchParams.get('limit')) rows = rows.slice(0, Number(url.searchParams.get('limit')));
       const [from, to] = (req.headers.range || `0-${rows.length}`).split('-').map(Number);
       return send(200, rows.slice(from, to + 1));
+    }
+    if (req.method === 'POST' && name === 'llan_locations') {
+      if (!role) return denied();
+      const r = Array.isArray(body) ? body[0] : body;
+      t.llan_locations.set(email, { ...r, email, team_id: myTeam, name: info.get(email)?.display_name || email, at: now() });
+      return send(201);
+    }
+    if (req.method === 'POST' && name === 'llan_work_log') {
+      if (!canWrite) return denied();
+      for (const r of Array.isArray(body) ? body : [body]) { const id = ++serial; table.set(String(id), { ...r, id, by_user: email, team_id: myTeam, at: r.at && service ? r.at : now() }); }
+      return send(201);
+    }
+    if (req.method === 'POST' && (name === 'llan_plans' || name === 'llan_assignments')) {
+      const list = Array.isArray(body) ? body : [body];
+      const key = name === 'llan_plans' ? 'id' : 'code';
+      for (const r of list) { const old = table.get(String(r[key])); if (!isLead(r.team_id) || (old && !isLead(old.team_id))) return denied(); }
+      for (const r of list) table.set(String(r[key]), { ...(table.get(String(r[key])) || {}), ...r });
+      return send(201);
+    }
+    if (req.method === 'DELETE' && (name === 'llan_plans' || name === 'llan_assignments')) {
+      const gone = [...table.values()].filter(match);
+      if (gone.some(r => !isLead(r.team_id))) return denied();
+      for (const r of gone) {
+        table.delete(String(name === 'llan_plans' ? r.id : r.code));
+        if (name === 'llan_plans') for (const [k, a] of t.llan_assignments) if (a.plan_id === r.id) t.llan_assignments.delete(k);
+      }
+      return send(204);
     }
     if (req.method === 'POST') {
       if (['llan_config', 'llan_parcel_status'].includes(name) ? !service : !canWrite) return denied();
@@ -141,7 +222,7 @@ export function fakeSupabase(members = { 'admin@test.local': 'admin', 'editor@te
     }
     send(405, { message: 'method' });
   });
-  return { server, t, state, members };
+  return { server, t, state, members, info };
 }
 
 export const listen = (srv, host = '127.0.0.1') => new Promise(r => srv.listen(0, host, () => r(`http://${host}:${srv.address().port}`)));

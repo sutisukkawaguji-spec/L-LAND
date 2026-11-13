@@ -1,7 +1,12 @@
 // Drawing and vertex editing on the MapView, in Web Mercator coordinates.
-// Modes: 'parcel' and 'building-poly' (click points), 'building-rect' (3 clicks), 'edit' (move/insert/delete vertices).
+// Modes: 'parcel' and 'building-poly' (click points), 'building-rect' (3 clicks), 'edit' (move/insert/delete vertices),
+// 'measure' (distance and area, nothing saved), 'split' (a cut line of 2 points), 'sign' (1 point: a sign's place).
 import { fromMercator, toMercator } from './shared/proj.mjs';
 import { dist, nearestOnSegment, rectFrom3, ringArea, selfIntersects } from './shared/geom.mjs';
+
+// Points needed before a shape can be finished, per mode.
+const NEED = { 'building-rect': 4, split: 2, sign: 1, measure: 2 };
+const need = mode => NEED[mode] ?? 3;
 
 const HANDLE = 14; // px: grab radius for vertices
 const SNAP = 12;   // px: snap radius
@@ -75,13 +80,14 @@ export class DrawTool {
       this.onEditSave?.(this.feature, this.result());
       return;
     }
-    const need = this.mode === 'building-rect' ? 4 : 3;
-    if (this.pts.length < need) return;
-    this.onFinish?.(this.mode, this.result());
+    if (this.pts.length < need(this.mode)) return;
+    this.onFinish?.(this.mode, this.result(), this.info());
   }
 
   // The drawn ring as a closed WGS84 GeoJSON Polygon (edit mode keeps the feature's other rings/parts).
   result() {
+    if (this.mode === 'sign') return { type: 'Point', coordinates: fromMercator(...this.pts[0]) };
+    if (this.mode === 'split' || this.mode === 'measure') return { type: 'LineString', coordinates: this.pts.map(([x, y]) => fromMercator(x, y)), mercator: this.pts.map(p => [...p]) };
     const ring = [...this.pts, this.pts[0]].map(([x, y]) => fromMercator(x, y));
     if (this.mode !== 'edit') return { type: 'Polygon', coordinates: [ring] };
     const g = this.feature.geometry;
@@ -96,8 +102,11 @@ export class DrawTool {
   }
   info() {
     const k = this.groundScale();
-    const closed = this.mode === 'building-rect' ? this.pts.length === 4 : this.pts.length >= 3;
-    return { points: this.pts.length, areaM2: closed ? ringArea(this.pts) * k * k : 0, crossing: this.pts.length > 3 && selfIntersects(this.pts) };
+    const closed = this.mode === 'building-rect' ? this.pts.length === 4 : this.mode === 'split' || this.mode === 'sign' ? false : this.pts.length >= 3;
+    let lengthM = 0;
+    for (let i = 1; i < this.pts.length; i++) lengthM += dist(this.pts[i - 1], this.pts[i]) * k;
+    const perimeterM = closed ? lengthM + dist(this.pts.at(-1), this.pts[0]) * k : 0;
+    return { points: this.pts.length, areaM2: closed ? ringArea(this.pts) * k * k : 0, lengthM, perimeterM, crossing: closed && this.pts.length > 3 && selfIntersects(this.pts) };
   }
 
   // ---------- internals ----------
@@ -111,11 +120,12 @@ export class DrawTool {
     }
     this.pts.push(p);
     this.#status(); this.map.draw();
+    if ((this.mode === 'sign' && this.pts.length === 1) || (this.mode === 'split' && this.pts.length === 2)) this.finish();
   }
 
   #status() {
     if (!this.mode) return;
-    this.onStatus?.({ mode: this.mode, ...this.info(), canFinish: this.mode === 'building-rect' ? this.pts.length === 4 : this.pts.length >= 3,
+    this.onStatus?.({ mode: this.mode, ...this.info(), canFinish: this.pts.length >= need(this.mode),
       canUndo: this.mode === 'edit' ? this.history.length > 0 : this.pts.length > 0, vertexSelected: this.selectedVertex >= 0 });
   }
 
@@ -194,11 +204,11 @@ export class DrawTool {
           return true;
         }
         // Tapping the first point closes the shape.
-        if (this.pts.length >= 3 && this.mode !== 'building-rect' && this.#vertexAt(p.screen) === 0) { this.finish(); return true; }
+        if (this.pts.length >= 3 && this.mode !== 'building-rect' && this.mode !== 'split' && this.#vertexAt(p.screen) === 0) { this.finish(); return true; }
         this.#add(this.#snap(p.map));
         return true;
       },
-      dblclick: () => { if (this.mode !== 'edit' && this.mode !== 'building-rect') { this.pts.pop(); this.finish(); } },
+      dblclick: () => { if (this.mode !== 'edit' && this.mode !== 'building-rect' && this.mode !== 'split' && this.mode !== 'sign') { this.pts.pop(); this.finish(); } },
       hover: (p) => { this.cursor = this.#snap(p.map); this.map.draw(); },
     };
   }
@@ -215,13 +225,15 @@ export class DrawTool {
       else ghost.push(c);
     }
     if (ghost.length >= 2) {
+      const open = this.mode === 'split';
       ctx.beginPath();
       ghost.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
-      if (ghost.length >= 3) ctx.closePath();
-      ctx.fillStyle = this.info().crossing ? 'rgba(214,69,69,.25)' : 'rgba(0,229,255,.18)';
-      if (ghost.length >= 3) ctx.fill();
+      if (ghost.length >= 3 && !open) ctx.closePath();
+      ctx.fillStyle = this.info().crossing ? 'rgba(214,69,69,.25)' : this.mode === 'measure' ? 'rgba(242,153,74,.18)' : 'rgba(0,229,255,.18)';
+      if (ghost.length >= 3 && !open) ctx.fill();
       ctx.lineWidth = 4; ctx.strokeStyle = 'rgba(0,0,0,.55)'; ctx.stroke();
-      ctx.lineWidth = 2; ctx.strokeStyle = sat ? '#00e5ff' : '#0b7285'; ctx.setLineDash([]); ctx.stroke();
+      ctx.lineWidth = 2; ctx.strokeStyle = this.mode === 'split' ? '#ff2d55' : this.mode === 'measure' ? '#f2994a' : sat ? '#00e5ff' : '#0b7285';
+      ctx.setLineDash(this.mode === 'split' ? [8, 5] : []); ctx.stroke(); ctx.setLineDash([]);
       // Length of the segment being drawn
       if (this.cursor && sp.length && this.mode !== 'edit') {
         const a = this.pts.at(-1), b = this.cursor, len = dist(a, b) * this.groundScale();

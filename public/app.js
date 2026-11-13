@@ -1,7 +1,7 @@
 import { MapView } from './map.js';
 import { ENTITIES, label, LAND_USE_TYPES, buildingTypeLabel, DOC_TYPES } from './shared/schema.mjs';
 import { toWah, formatNumber, num, buddhistYearNow, formatRNW } from './shared/calc.mjs';
-import { CRS_LIST } from './shared/proj.mjs';
+import { CRS_LIST, toMercator } from './shared/proj.mjs';
 import { nextBuildingCode } from './shared/geom.mjs';
 import { validateRecord } from './shared/validate.mjs';
 import { diffRecord } from './shared/diff.mjs';
@@ -291,12 +291,15 @@ $('#tabs').addEventListener('click', e => {
   renderActiveTab();
 });
 function renderActiveTab() {
-  ({ map: () => map.resize(), status: renderStatus, registry: renderRegistry, checks: renderChecks, changes: renderChanges, ltax: renderLtax, data: renderData, settings: renderSettings }[activeTab] || (() => {}))();
+  ({ map: () => map.resize(), status: renderStatus, registry: renderRegistry, checks: renderChecks, changes: renderChanges, ltax: renderLtax, data: renderData, settings: renderSettings }[activeTab]
+    || WEBAUTH.survey?.render[activeTab] || (() => {}))();
 }
+const goTab = tab => $(`#tabs button[data-tab="${tab}"]`)?.click();
 
 // ---------- map ----------
 const map = new MapView($('#map'), {
   onSelect: hit => showFeature(hit?.feature || null),
+  onMarker: m => (m.kind === 'sign' ? openEditor('signboards', m.data.id) : WEBAUTH.survey?.onMarker(m)),
   onHover: (hit, e) => {
     const tip = $('#mapTip');
     if (!hit) { tip.hidden = true; return; }
@@ -319,7 +322,17 @@ function pushState(entity, rec) {
   if (rec.pending === 'update') return ['#f2c94c', 'แก้ไขแล้ว รอส่ง'];
   return ['#b7dfc2', 'ตรงกับ LTAX'];
 }
+// Survey teams (web): parcels given out, or a plan being drawn up (preview) before it is saved.
+let PREVIEW = null;
 const STYLE = {
+  assign: f => {
+    if (PREVIEW) {
+      if (f.kind === 'building') return ['#555555', 'อาคาร'];
+      const r = PREVIEW.rows.get(String(f.code || '').toUpperCase());
+      return r ? PREVIEW.style(r) : ['#e3e7ec', 'ไม่อยู่ในแผนนี้'];
+    }
+    return WEBAUTH.survey?.on ? WEBAUTH.survey.styleOf(f) : ['#cfd6de', 'ยังไม่มีทีมสำรวจ'];
+  },
   survey: f => {
     if (f.kind === 'building') return ['#555555', 'อาคาร'];
     const code = (f.code || '').toUpperCase();
@@ -402,8 +415,25 @@ function refreshMap(fit = false) {
   // Keep the multi-selection pointing at the freshly loaded shapes.
   if (map.multi?.size) { const ids = new Set([...map.multi].map(f => f.id)); map.multi = new Set(map.layers.flatMap(l => l.features).filter(f => ids.has(f.id))); }
   $('#mapSearchList').innerHTML = [...S.featByCode.keys()].slice(0, 5000).map(c => `<option value="${esc(c)}">`).join('');
+  updateMarkers();
+}
+// Points over the shapes: signs placed on the map, and (for team leads) where the team is.
+function updateMarkers() {
+  const signs = (S.rec?.signboards || []).filter(s => Number.isFinite(Number(s.loc?.lat)) && Number.isFinite(Number(s.loc?.lon)))
+    .map(s => ({ kind: 'sign', lon: Number(s.loc.lon), lat: Number(s.loc.lat), label: s.signboardName, data: s }));
+  map.markers = [...signs, ...(WEBAUTH.survey?.markers() || [])];
   map.draw();
 }
+// Parcel codes a record belongs to (for the survey teams' locks).
+function recordCodes(entity, rec) {
+  if (!rec) return [];
+  const up = c => String(c || '').toUpperCase();
+  if (entity === 'lands') return [up(rec.parcelCode)];
+  if (entity === 'buildings') return [...(rec.landIds || []).map(id => up(S.by.lands.get(id)?.parcelCode)), up(String(rec.buildingCode || '').split('-')[0])].filter(Boolean);
+  if (entity === 'signboards') return [up(S.by.lands.get(rec.landId)?.parcelCode)].filter(Boolean);
+  return [];
+}
+const lockHtml = lock => (lock ? `<div class="lock-box">🔒 <b>${esc(lock.reason)}</b><br><span>ดูข้อมูลได้ แต่แก้ไขไม่ได้ เพื่อไม่ให้ทำงานซ้ำซ้อน</span></div>` : '');
 $('#mapColor').addEventListener('change', () => refreshMap());
 $('#mapBase').addEventListener('change', e => { map.setBasemap(e.target.value); refreshMap(); });
 $('#layerToggles').addEventListener('change', e => { if (e.target.dataset.layer) { map.setVisible(e.target.dataset.layer, e.target.checked); refreshMap(); } });
@@ -473,8 +503,12 @@ async function showFeature(f) {
     </dl>`;
   }
   side.classList.add('open');
+  const pcode = String(f.code || '').toUpperCase().split(f.kind === 'building' ? '-' : '\u0000')[0];
+  const lock = WEBAUTH.survey?.lockOf(pcode) || null;
+  side.classList.toggle('locked', !!lock);
   side.innerHTML = `
     <div class="side-head"><h3>${esc(f.code || '(ไม่มีรหัส)')}</h3><button class="close" id="sideClose" title="ปิด">✕</button></div>
+    ${lockHtml(lock)}${WEBAUTH.survey?.assignInfo(pcode) || ''}
     <div class="muted">${esc(layer?.name)} · FID ${f.fid}${f.areaM2 ? ` · พื้นที่ในแผนที่ ${formatNumber(f.areaM2 / 4)} ตร.ว. (${formatNumber(f.areaM2)} ตร.ม.)` : ''}</div>
     <div>${rec ? `<span class="pill" style="background:${pushState(entity, rec)[0]}33">${esc(pushState(entity, rec)[1])}</span>` : ''}${rec ? `<span class="pill ok">มีในทะเบียน</span>${rec.pending === 'create' ? '<span class="pill info">ยังไม่มีใน LTAX</span>' : rec.pending === 'update' ? '<span class="pill warn">แก้ไขแล้ว รอส่ง</span>' : '<span class="pill ok">ตรงกับ LTAX</span>'}` : '<span class="pill err">ไม่มีในทะเบียน</span>'}
       ${chk ? `<span class="pill ${chk.found ? 'ok' : 'err'}">${chk.found ? (chk.count > 1 ? `พบใน LTAX ${chk.count} รายการ` : 'พบใน LTAX') : 'ไม่พบใน LTAX'} · ตรวจ ${new Date(chk.at).toLocaleDateString('th-TH')}</span>` : ''}
@@ -615,6 +649,7 @@ function showSelection() {
 }
 map.multi = new Set();
 const mapEdit = setupMapEditing({ map, S, api, esc, toast, guard, confirmBox, reloadAll: () => reloadAll(), selectFeature, openEditor: (...a) => openEditor(...a), ownerNames,
+  lockOf: code => WEBAUTH.survey?.lockOf(code) || null,
   // The "เลือกหลายแปลง" tool: taps toggle shapes in the selection instead of opening one.
   onMultiTool: () => {
     map.tool = { multi: true, click: p => { const hit = map.pick(...p.screen); if (hit) { map.multi.has(hit.feature) ? map.multi.delete(hit.feature) : map.multi.add(hit.feature); map.draw(); showSelection(); } return true; } };
@@ -801,10 +836,12 @@ function openEditor(entity, id, preset = {}) {
     const changes = rec.synced ? diffRecord(entity, rec) || [] : null;
     const ownerOpts = S.rec.owners.slice(0, 6000).map(o => `<option value="${esc(`${ownerName(o)} | ${o.psnId || '-'} | ${o.id}`)}">`).join('');
     const landOpts = S.rec.lands.map(l => `<option value="${esc(`${l.parcelCode} | ${ownerNames(l.ownerIds)} | ${l.id}`)}">`).join('');
+    const lock = WEBAUTH.survey?.lockForCodes(recordCodes(entity, id ? S.by[entity].get(id) : rec)) || null;
+    form.classList.toggle('locked', !!lock);
     form.innerHTML = `<div class="head"><h3>${id ? 'แก้ไข' : 'เพิ่ม'}${def.th}: ${esc(def.title(rec))}</h3>
         ${rec.ltaxId ? `<span class="pill">รหัสใน LTAX ${esc(rec.ltaxId)}</span>` : '<span class="pill info">ยังไม่มีใน LTAX</span>'}
         <button type="button" data-close>ปิด</button></div>
-      <div class="body">
+      <div class="body">${lockHtml(lock)}
         ${issues.length ? `<ul class="issues">${issues.map(i => `<li class="${i.level}">${esc(i.message)}</li>`).join('')}</ul>` : '<p class="pill ok">ผ่านการตรวจสอบ</p>'}
         ${changes && changes.length ? `<p class="muted">ช่องสีเหลือง = ต่างจากค่าใน LTAX (${changes.length} ช่อง) ชี้ที่ช่องเพื่อดูค่าเดิม</p>` : ''}
         ${groups.map(g => `<fieldset><legend>${esc(g.name || 'ข้อมูลหลัก')}</legend><div class="fields">${g.fields.map(f => `<label class="${f.type === 'textarea' ? 'wide' : ''}"><span>${esc(f.th)}${f.required ? ' <span class="req">*</span>' : ''}</span>${fieldInput(f, rec[f.key], rec.synced).replace(/class="([^"]*)"/, (m, c) => `class="${c}${bad.has(f.key) ? ' bad' : ''}"`)}</label>`).join('')}</div></fieldset>`).join('')}
@@ -1167,6 +1204,56 @@ async function postXlsx(preview) {
     + (r.report.problems.length ? `<details><summary>ข้อสังเกต ${r.report.problems.length} รายการ</summary><ul>${r.report.problems.slice(0, 300).map(p => `<li>${esc(p.sheet)} ${esc(p.row)}: ${esc(p.message)}</li>`).join('')}</ul></details>` : '');
   if (!preview) { toast('นำเข้า Excel แล้ว'); await reloadAll(); }
 }
+// ตารางแบบฟอร์ม LTAX: export, check, import; what changed waits for LTAX.
+const TBL_TH = { owners: 'เจ้าของ', lands: 'ที่ดิน', buildings: 'สิ่งปลูกสร้าง', signboards: 'ป้าย' };
+let tblItems = [];
+$('#tblScope').addEventListener('change', e => { $('#tblExport').href = `/api/export/ltax-table?scope=${e.target.value}`; });
+function tableReportHtml(r) {
+  const c = r.counts;
+  const rows = Object.entries(TBL_TH).map(([k, th]) => `<tr><td>${th}</td><td class="num">${c[k]?.create ?? 0}</td><td class="num">${c[k]?.update ?? 0}</td><td class="num">${c[k]?.same ?? 0}</td></tr>`).join('');
+  const errs = r.problems.filter(p => p.level === 'error'), warns = r.problems.filter(p => p.level !== 'error');
+  return `<p>${r.imported ? '<b>นำเข้าแล้ว</b>' : '<b>ผลตรวจไฟล์</b> (ยังไม่ได้บันทึก)'} · ชีตที่พบ: ${esc(r.sheets.join(', '))}</p>
+    <table class="grid counts"><tr><th></th><th>เพิ่มใหม่</th><th>แก้ไข</th><th>ไม่เปลี่ยน</th></tr>${rows}</table>
+    ${r.errorCount ? `<p class="pill warn">${r.errorCount.toLocaleString()} รายการยังมีข้อผิดพลาด บันทึกเข้า L-LAN ได้ แต่ส่ง LTAX ไม่ได้จนกว่าจะแก้</p>` : ''}
+    ${errs.length ? `<details open><summary class="err">ค่าที่ใช้ไม่ได้ ${r.problemCount > r.problems.length ? `${r.problemCount.toLocaleString()} (แสดง ${r.problems.length})` : errs.length} รายการ: ช่องนั้นจะไม่ถูกเปลี่ยน</summary><ul>${errs.map(p => `<li>ชีต ${esc(p.sheet)} แถว ${p.row}: ${esc(p.message)}</li>`).join('')}</ul></details>` : ''}
+    ${warns.length ? `<details><summary>ข้อสังเกต ${warns.length} รายการ</summary><ul>${warns.map(p => `<li>ชีต ${esc(p.sheet)} แถว ${p.row}: ${esc(p.message)}</li>`).join('')}</ul></details>` : ''}
+    ${r.changeCount ? `<details${r.imported ? '' : ' open'}><summary>รายการที่${r.imported ? '' : 'จะ'}เปลี่ยน ${r.changeCount.toLocaleString()} รายการ${r.changeCount > r.changes.length ? ` (แสดง ${r.changes.length})` : ''}</summary><div class="list">${r.changes.map(x => `<div class="item"><header><b>${esc(TBL_TH[x.entity])} ${esc(x.title)}</b>
+      <span class="pill ${x.action === 'create' ? 'info' : 'warn'}">${x.action === 'create' ? 'เพิ่มใหม่' : `แก้ ${x.changes.length} ช่อง`}</span>${x.errors.length ? `<span class="pill err">มีข้อผิดพลาด ${x.errors.length}</span>` : ''}</header>
+      ${x.changes.length ? `<ul>${x.changes.map(d => `<li>${esc(d.th)}: <span class="from">${esc(d.from || '(ว่าง)')}</span> → <span class="to">${esc(d.to || '(ว่าง)')}</span></li>`).join('')}</ul>` : ''}
+      ${x.errors.length ? `<ul class="issues">${x.errors.map(m => `<li class="error">${esc(m)}</li>`).join('')}</ul>` : ''}</div>`).join('')}</div></details>`
+      : '<p class="muted">ไม่มีอะไรต่างจากข้อมูลใน L-LAN</p>'}
+    ${r.imported && r.status && !WEB ? statusSummaryHtml(r.status) : ''}`;
+}
+async function postTable(apply) {
+  const file = $('#tblFile').files[0];
+  if (!file) throw new Error('เลือกไฟล์ Excel ก่อน');
+  $('#tblResult').textContent = 'กำลังอ่านไฟล์…';
+  $('#tblSend').hidden = true;
+  const body = { name: file.name, file: await fileB64(file), preview: true };
+  const check = await api('POST', '/api/import/ltax-table', body);
+  $('#tblResult').innerHTML = tableReportHtml(check);
+  if (!apply) return;
+  if (!check.changeCount) return toast('ไฟล์นี้ไม่มีอะไรต่างจากข้อมูลใน L-LAN');
+  const n = k => Object.values(check.counts).reduce((s, c) => s + c[k], 0);
+  const bad = check.problems.filter(p => p.level === 'error').length;
+  if (!(await confirmBox(`นำเข้าตารางแบบฟอร์ม LTAX?<br>เพิ่มใหม่ <b>${n('create').toLocaleString()}</b> · แก้ไข <b>${n('update').toLocaleString()}</b> รายการ`
+    + (bad ? `<br><span class="muted">มีค่าที่ใช้ไม่ได้ ${bad.toLocaleString()} ช่อง ช่องเหล่านั้นจะไม่ถูกเปลี่ยน</span>` : '')
+    + `<br><span class="muted">รายการที่เปลี่ยนจะไปรอส่งเข้า LTAX (ยังไม่ส่งเข้า LTAX ตอนนี้)</span>`, { ok: 'นำเข้า' }))) return;
+  const done = await api('POST', '/api/import/ltax-table', { ...body, preview: false });
+  tblItems = done.items || [];
+  $('#tblResult').innerHTML = tableReportHtml(done);
+  $('#tblSend').hidden = WEB || !tblItems.length;
+  toast(`นำเข้าแล้ว ${tblItems.length.toLocaleString()} รายการ รอส่งเข้า LTAX`);
+  await reloadAll();
+}
+$('#tblPreview').addEventListener('click', guard(() => postTable(false)));
+$('#tblImport').addEventListener('click', guard(() => postTable(true)));
+$('#tblSend').addEventListener('click', () => {
+  S.selected = new Set(tblItems.map(it => `${it.entity}:${it.recordId}`));
+  $('#jobScope').value = 'selected'; $('#jobType').value = 'push';
+  $('#tabs button[data-tab="ltax"]').click();
+  toast(`เลือก ${S.selected.size.toLocaleString()} รายการที่นำเข้าแล้ว เริ่มด้วยโหมดทดลองก่อน`);
+});
 $('#xlsxPreview').addEventListener('click', guard(() => postXlsx(true)));
 $('#xlsxImport').addEventListener('click', guard(() => postXlsx(false)));
 $('#shpImport').addEventListener('click', guard(async () => {
@@ -1298,6 +1385,19 @@ $('#loginSso').addEventListener('click', guard(async () => {
 $('#loginOffline').addEventListener('click', guard(async () => { S.session = await api('POST', '/api/session/offline'); showSession(); }));
 
 // ---------- web mode: Supabase sign-in, data in Supabase, downloads ----------
+const NAV_ICON = {
+  map: '<path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2Z"/><path d="M9 4v14M15 6v14"/>',
+  mywork: '<rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V3h6v1M9 12l2 2 4-4"/>',
+  status: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
+  team: '<circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><circle cx="17" cy="9" r="2.5"/><path d="M15.5 14.2c2.9.3 5.5 2.6 5.5 5.8"/>',
+  summary: '<path d="M4 19h16M7 16V9M12 16V5M17 16v-4"/>',
+  plan: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4M8 15h3M13 15h3"/>',
+  registry: '<path d="M5 4h11l3 3v13H5Z"/><path d="M9 10h6M9 14h6M9 18h4"/>',
+  checks: '<path d="M12 3 2 20h20Z"/><path d="M12 10v4M12 17v.5"/>',
+  changes: '<path d="M4 20h4l11-11-4-4L4 16Z"/><path d="M13.5 6.5l4 4"/>',
+  data: '<path d="M12 3v12M7 10l5 5 5-5M4 21h16"/>',
+  more: '<circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/>',
+};
 const SB = () => String(CONFIG?.url || '').replace(/\/$/, '');
 const wsave = v => { try { v ? localStorage.setItem('llan.full.session', JSON.stringify(v)) : localStorage.removeItem('llan.full.session'); } catch { /* blocked */ } };
 const wload = () => { try { return JSON.parse(localStorage.getItem('llan.full.session')); } catch { return null; } };
@@ -1322,6 +1422,8 @@ async function webToken() {
 }
 function webSignOut(msg = '') {
   clearInterval(webOpen.timer);
+  WEBAUTH.survey?.stop(); WEBAUTH.survey = null;
+  $('#surveyChips') && ($('#surveyChips').innerHTML = '');
   Object.assign(WEBAUTH, { session: null, dispatch: null, store: null, role: null }); wsave(null);
   S.session = { mode: 'none' }; showSession();
   $('#loginState').textContent = msg;
@@ -1334,19 +1436,39 @@ function showWebSession() {
   $('#logout')?.addEventListener('click', guard(async () => { if (await confirmBox('ออกจากระบบ?')) webSignOut(); }));
 }
 async function webOpen() {
-  const [{ Cloud }, { CloudStore }, { coreRoutes, router }] = await Promise.all([import('./lib/cloud.mjs'), import('./lib/cloud-store.mjs'), import('./lib/core-api.mjs')]);
+  const [{ Cloud }, { CloudStore }, { coreRoutes, router }, surveyMod] = await Promise.all([import('./lib/cloud.mjs'), import('./lib/cloud-store.mjs'), import('./lib/core-api.mjs'), import('./survey.js')]);
   const cloud = new Cloud({ url: SB(), key: CONFIG.key, token: webToken });
   const email = WEBAUTH.session.email;
-  const role = await cloud.myRole(email);
-  if (!role) throw new Error('บัญชีนี้ยังไม่ได้รับสิทธิ์ใช้งาน (ให้ผู้ดูแลเพิ่มอีเมลใน llan_members)');
+  // Survey teams: people without a team join with the key from their team lead.
+  let me = await cloud.me(email);
+  if (me.teams && (!me.role || (!me.team_id && me.role !== 'admin'))) {
+    $('#loginState').textContent = '';
+    const joined = await surveyMod.askJoin({ cloud, email, canSkip: !!me.role, esc });
+    if (joined === 'logout') return webSignOut();
+    if (joined) me = await cloud.me(email);
+  }
+  const role = me.role;
+  if (!role) throw new Error('บัญชีนี้ยังไม่ได้รับสิทธิ์ใช้งาน: ใส่รหัสทีมจากหัวหน้าทีม หรือให้ผู้ดูแลเพิ่มอีเมลใน llan_members');
   $('#loginState').textContent = 'กำลังโหลดข้อมูล…';
   const store = await new CloudStore(cloud, { email }).open();
-  Object.assign(WEBAUTH, { store, role, cloud, dispatch: router(coreRoutes(store, { settings: () => ({ ...store.settings, cloud: {} }), state: () => ({ dataDir: 'Supabase (ออนไลน์)' }),
-    statuses: () => ({ rows: store.list('statuses'), checkedAt: store.statusCheckedAt }) })) });
+  const survey = await surveyMod.createSurvey({ cloud, email, me, ui: { S, map, esc, toast, guard, confirmBox, $, ownerNames, showFeature, goTab, activeTab: () => activeTab,
+    refreshMap: () => refreshMap(), updateMarkers, setColor: mode => { $('#mapColor').value = mode; refreshMap(); },
+    flyTo: (lon, lat) => { map.center = toMercator(lon, lat); map.res = Math.min(map.res, 1.5); map.draw(); },
+    fitCodes: codes => { const fs = map.layers.flatMap(l => l.features).filter(f => codes.has(String(f.code || '').toUpperCase())); if (fs.length) map.fit(fs, 60); },
+    fitPeople: locs => { if (!locs.length) return toast('ยังไม่มีตำแหน่งของสมาชิก', true); const xs = locs.map(l => toMercator(l.lon, l.lat)); map.center = [xs.reduce((s, p) => s + p[0], 0) / xs.length, xs.reduce((s, p) => s + p[1], 0) / xs.length]; map.res = Math.max(1, Math.max(...xs.map(p => Math.abs(p[0] - map.center[0])), ...xs.map(p => Math.abs(p[1] - map.center[1]))) * 2.6 / Math.min(map.w, map.h)); map.draw(); },
+    preview: (rows, style) => { PREVIEW = rows ? { rows, style } : null; if (rows) $('#mapColor').value = 'assign'; refreshMap(); } } });
+  Object.assign(WEBAUTH, { store, role, cloud, survey, dispatch: router(coreRoutes(store, { settings: () => ({ ...store.settings, cloud: {} }), state: () => ({ dataDir: 'Supabase (ออนไลน์)' }),
+    statuses: () => ({ rows: store.list('statuses'), checkedAt: store.statusCheckedAt }),
+    ...(survey.on ? { team: () => survey.me.team_id || null, locked: code => survey.lockOf(code), onWork: ev => survey.logWork(ev) } : {}) })) });
   document.body.classList.toggle('viewer', role === 'viewer');
+  document.body.classList.toggle('lead', survey.on && survey.isLead());
+  document.body.classList.toggle('teams', survey.on);
   S.session = { mode: 'web', user: { email, role } };
   showSession();
+  // Surveyors start on their own work, colour by the work given out.
+  if (survey.on && !refreshMap.fitted) $('#mapColor').value = 'assign';
   await reloadAll();
+  survey.start();
   clearInterval(webOpen.timer);
   webOpen.timer = setInterval(() => webRefresh().catch(err => console.warn(err)), 30000);
 }
@@ -1358,12 +1480,34 @@ async function webRefresh() {
 }
 function webStart() {
   document.body.classList.add('web');
+  // Icons for the navigation (rail on wide screens, bottom bar on phones).
+  for (const b of $$('#tabs button[data-tab]')) if (NAV_ICON[b.dataset.tab]) b.insertAdjacentHTML('afterbegin', `<svg viewBox="0 0 24 24" aria-hidden="true">${NAV_ICON[b.dataset.tab]}</svg>`);
+  $('#navMore')?.insertAdjacentHTML('afterbegin', `<svg viewBox="0 0 24 24" aria-hidden="true">${NAV_ICON.more}</svg>`);
+  $('#navMore')?.addEventListener('click', () => $('#tabs').classList.toggle('expanded'));
+  $('#tabs').addEventListener('click', e => { if (e.target.closest('button[data-tab]')) $('#tabs').classList.remove('expanded'); });
   $('.login-box').innerHTML = '<img src="icon.svg" alt=""><h2>เข้าสู่ระบบ L-LAN</h2>'
     + '<p class="muted">ใช้อีเมลและรหัสผ่านของบัญชี L-LAN ข้อมูลอยู่ใน Supabase แก้ไขได้จากทุกที่ การส่งเข้า LTAX ทำที่เครื่องสำนักงาน</p>'
     + '<form id="webLogin"><input id="wEmail" type="email" placeholder="อีเมล" autocomplete="username" required>'
     + '<input id="wPass" type="password" placeholder="รหัสผ่าน" autocomplete="current-password" required>'
     + '<button class="primary big">เข้าสู่ระบบ</button></form><div id="loginState" class="state"></div>'
+    + '<button type="button" class="link" id="showSignup">ยังไม่มีบัญชี? สมัครใช้งานด้วยรหัสทีม</button>'
+    + '<form id="webSignup" hidden><input id="sEmail" type="email" placeholder="อีเมล" autocomplete="username" required>'
+    + '<input id="sPass" type="password" placeholder="ตั้งรหัสผ่าน (อย่างน้อย 6 ตัว)" minlength="6" autocomplete="new-password" required>'
+    + '<input id="sName" placeholder="ชื่อที่แสดงให้ทีมเห็น" required><input id="sKey" placeholder="รหัสทีม (จากหัวหน้าทีม)" required style="text-transform:uppercase">'
+    + '<button class="primary big">สมัครและเข้าร่วมทีม</button></form>'
     + '<a class="link" href="map.html">เปิดแผนที่อย่างเดียว (เบากว่า)</a>';
+  $('#showSignup').addEventListener('click', () => { $('#webSignup').hidden = !$('#webSignup').hidden; $('#webLogin').hidden = !$('#webSignup').hidden; $('#showSignup').textContent = $('#webSignup').hidden ? 'ยังไม่มีบัญชี? สมัครใช้งานด้วยรหัสทีม' : 'มีบัญชีแล้ว? เข้าสู่ระบบ'; });
+  $('#webSignup').addEventListener('submit', guard(async e => {
+    e.preventDefault();
+    try { localStorage.setItem('llan.joinKey', $('#sKey').value.trim()); localStorage.setItem('llan.joinName', $('#sName').value.trim()); } catch { /* blocked */ }
+    $('#loginState').textContent = 'กำลังสมัคร…';
+    let d;
+    try { d = await sbAuth('signup', { email: $('#sEmail').value.trim(), password: $('#sPass').value, data: { name: $('#sName').value.trim() } }); }
+    catch (err) { $('#loginState').textContent = /already|registered/i.test(err.message) ? 'อีเมลนี้มีบัญชีแล้ว ให้เข้าสู่ระบบ แล้วใส่รหัสทีม' : err.message; return; }
+    if (!d.access_token) { $('#loginState').textContent = 'สมัครแล้ว: เปิดอีเมลแล้วกดลิงก์ยืนยัน จากนั้นกลับมาเข้าสู่ระบบ ระบบจะใส่รหัสทีมให้'; return; }
+    keepWeb(d);
+    try { await webOpen(); } catch (err) { $('#loginState').textContent = err.message; }
+  }));
   $('#webLogin').addEventListener('submit', guard(async e => {
     e.preventDefault();
     $('#loginState').textContent = 'กำลังเข้าสู่ระบบ…';
